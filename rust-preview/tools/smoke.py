@@ -61,6 +61,9 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
             for method in project['methods']:
                 view=request(f"/api/sheet/{project['code']}/{method['key']}")
                 assert view['view']['columns'] and view['view']['styles']
+                if project['code']=='D006' and method['key']=='chloride':
+                    historical=next(c for r in view['view']['rows'] for c in r['cells'] if c['ref']=='A4')
+                    assert historical['value']=='2026-10-08' and historical['raw']=='20261008'
                 raw={f['key']:f['sample'] for f in method['fields']}
                 payload={'project':project['code'],'method':method['key'],'date':'2026-10-09','batch':f'RUST-TEST-{total}','notes':'isolated smoke','measurements':[raw,dict(raw)]}
                 _,expected=calculate(method['kind'],raw,method['params'])
@@ -166,7 +169,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         pending=[r for r in q1904['view']['rows'] if r['number'] in q1904['rows']]
         assert pending[0]['cells'][0]['value']=='2026-10-20' and pending[0]['cells'][0]['raw']=='44853'
         assert original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in source.glob('*.xlsx')}
-        result={'methods':total,'decimal_parity':True,'unrelated_zip_members_preserved':True,'preview_no_write':True,'idempotence':True,'concurrent_conflict':True,'interrupted_finalize_recovery':True,'csrf_and_host_check':True,'sqlite_snapshots':True,'originals_unchanged':True,'multi_batch_grouping':True,'date_display_and_single_labels':True,'continued_group_blanks':True,'all_200_pending_rows_visible':True,'invalid_batch_atomic_rejection':True,'date1904_and_style_reuse':True}
+        result={'methods':total,'decimal_parity':True,'unrelated_zip_members_preserved':True,'preview_no_write':True,'idempotence':True,'concurrent_conflict':True,'interrupted_finalize_recovery':True,'csrf_and_host_check':True,'sqlite_snapshots':True,'originals_unchanged':True,'multi_batch_grouping':True,'date_display_and_single_labels':True,'continued_group_blanks':True,'all_200_pending_rows_visible':True,'invalid_batch_atomic_rejection':True,'date1904_and_style_reuse':True,'historical_compact_dates':True}
         (root.parent/'runtime/rust-smoke-result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         print(json.dumps(result,indent=2))
     finally:

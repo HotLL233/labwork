@@ -127,6 +127,12 @@ fn serial_date(n:i64,date1904:bool)->Option<chrono::NaiveDate> {
     let base=if date1904{chrono::NaiveDate::from_ymd_opt(1904,1,1)?}else if n<60{chrono::NaiveDate::from_ymd_opt(1899,12,31)?}else{chrono::NaiveDate::from_ymd_opt(1899,12,30)?};
     base.checked_add_signed(chrono::Duration::try_days(n)?)
 }
+fn cell_date(value:&str,date1904:bool)->Option<chrono::NaiveDate> {
+    let value=value.trim();
+    let parsed=["%Y-%m-%d","%Y/%m/%d","%Y.%m.%d","%Y%m%d"].iter().find_map(|f|chrono::NaiveDate::parse_from_str(value,f).ok())
+        .or_else(||value.parse::<i64>().ok().and_then(|n|serial_date(n,date1904)));
+    parsed.filter(|d|(1900..=2100).contains(&chrono::Datelike::year(d)))
+}
 fn display(value:&str,format:&str,numeric:bool,date1904:bool)->String{
     if !numeric||value.is_empty(){return value.into();}let Ok(mut n)=value.parse::<f64>()else{return value.into()};
     if !n.is_finite(){return value.into();}
@@ -149,8 +155,9 @@ pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
             let value=cell_value(cell,&book.strings)?;let style=cell.attribute("s").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
             let formula=cell.children().find(|n|n.has_tag_name("f")).and_then(|n|n.text()).unwrap_or("");
             let numeric=!matches!(cell.attribute("t"),Some("s"|"inlineStr"|"str"|"e"|"b"));
-            let format=if r>=4&&reference.trim_end_matches(|c:char|c.is_ascii_digit())==method.columns["date"] {"yyyy-mm-dd"}else{num.get(style).map(String::as_str).unwrap_or("General")};
-            all.insert((r,c),json!({"ref":reference,"value":display(&value,format,numeric,book.date1904),"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
+            let is_date=r>=4&&reference.trim_end_matches(|c:char|c.is_ascii_digit())==method.columns["date"];
+            let shown=if is_date {cell_date(&value,book.date1904).map(|d|d.to_string()).unwrap_or_else(||value.clone())}else{display(&value,num.get(style).map(String::as_str).unwrap_or("General"),numeric,book.date1904)};
+            all.insert((r,c),json!({"ref":reference,"value":shown,"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
         }
     }
     max_col=max_col.min(40); // shortcut: method preview displays A:AN; wider templates need pagination before onboarding.
@@ -194,7 +201,7 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
     let (mut previous_date,mut previous_batch)=(String::new(),String::new());
     for r in 4..=last {
         if let Some(v)=values.get(&format!("{}{r}",method.columns["date"])).filter(|v|!v.is_empty()) {
-            let date=v.parse::<i64>().ok().and_then(|n|serial_date(n,book.date1904)).map(|d|d.to_string()).unwrap_or_else(||v.clone());if date!=previous_date {previous_batch.clear();}previous_date=date;
+            let date=cell_date(v,book.date1904).map(|d|d.to_string()).unwrap_or_else(||v.clone());if date!=previous_date {previous_batch.clear();}previous_date=date;
         }
         if let Some(v)=values.get(&format!("{}{r}",method.columns["batch"])).filter(|v|!v.is_empty()){previous_batch=v.clone();}
     }
@@ -231,8 +238,14 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         if row.attributes.get("r").and_then(|r|r.parse::<u32>().ok()).is_some_and(|r|r>=4&&r<=last) {
             for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element) {
                 let reference=cell.attributes.get("r").cloned().unwrap_or_default();
-                if reference.trim_end_matches(|c:char|c.is_ascii_digit())==date_col&& !matches!(cell.attributes.get("t").map(String::as_str),Some("s"|"inlineStr"|"str"|"e"|"b"))&&values.get(&reference).is_some_and(|v|v.parse::<i64>().is_ok()) {
-                    if let Some(style)=source_styles.get(date_col){cell.attributes.insert("s".into(),style.clone());}
+                if reference.trim_end_matches(|c:char|c.is_ascii_digit())==date_col&& !matches!(cell.attributes.get("t").map(String::as_str),Some("s"|"inlineStr"|"str"|"e"|"b")) {
+                    if let Some(date)=values.get(&reference).and_then(|v|cell_date(v,book.date1904)) {
+                        let serial=date_serial(date,book.date1904).to_string();
+                        if cell.get_child("f").is_none()||values.get(&reference)==Some(&serial) {
+                            if let Some(v)=cell.get_mut_child("v"){v.children=vec![XMLNode::Text(serial)];}
+                            if let Some(style)=source_styles.get(date_col){cell.attributes.insert("s".into(),style.clone());}
+                        }
+                    }
                 }
             }
         }
@@ -300,5 +313,7 @@ mod tests {
         assert!(!is_date_format("0.00\"mg/d\""));
         assert!(!is_date_format("[Magenta]0.00"));
         assert!(is_date_format("[$-409]m/d/yyyy"));
+        for value in ["20261008","2026-10-08","2026/10/8","2026.10.8","46303"] {assert_eq!(cell_date(value,false).unwrap().to_string(),"2026-10-08");}
+        assert!(cell_date("20260230",false).is_none());
     }
 }

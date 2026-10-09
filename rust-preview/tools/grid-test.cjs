@@ -11,6 +11,16 @@ const pasted=grid.paste([],keys,0,0,'2026/10/9\tA-01\t1\n\t\t2\n2026-10-10\tA-02
 const entries=grid.entries(pasted,[{key:'mass'}]);assert.equal(entries[1].batch,'A-01');assert.equal(entries[1].date,'2026-10-09');assert.equal(entries[2].measurement.mass,'3');
 assert.throws(()=>grid.entries([{date:'2026-10-10',batch:''}],[{key:'mass'}]));
 assert.throws(()=>grid.paste([],keys,199,0,'1\n2',()=>({})));
+assert.throws(()=>grid.fill(rows,keys,{r0:0,r1:0,c0:0,c1:0},1.5,'copy'));
 assert.equal(grid.date('46304'),'2026-10-09');
+assert.equal(grid.date('20261008'),'2026-10-08');
+const inherited=grid.labels([{date:'2026-01-01',batch:'ABC'},{date:'',batch:''}]);
+assert.equal(inherited[1].date,'2026-01-01');assert.equal(inherited[1].batch,'ABC');
+assert.throws(()=>grid.entries([{date:'2026-01-01',batch:'ABC'},{date:'',batch:'',_requireBatch:true}],[{key:'mass'}]));
+assert.equal(grid.entries([{date:'2026-01-01',batch:'ABC'},{date:'',batch:'NEW',_requireBatch:true},{date:'',batch:''}],[{key:'mass'}])[2].batch,'NEW');
+const blankGroup=[{date:'2026-01-01',batch:'OLD'},{date:'',batch:'',_requireBatch:true},{date:'',batch:''},{date:'',batch:''}];
+const removed=grid.remove(blankGroup,1,1);assert.throws(()=>grid.entries(removed,[{key:'mass'}]));
+removed[1].batch='NEW';assert.equal(grid.entries(removed,[{key:'mass'}])[2].batch,'NEW');
+blankGroup[1].batch='NEW';assert.equal(grid.entries(grid.remove(blankGroup,1,1),[{key:'mass'}])[1].batch,'NEW');
 assert.equal(grid.series(['2026-02-28'],1,'date'),'2026-03-01');
 console.log('Grid: paste, inherited labels, range copy, date/batch/decimal series and 200-row boundary passed');
