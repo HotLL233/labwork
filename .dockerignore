@@ -1,0 +1,16 @@
+*
+!requirements.lock
+!manage.py
+!runtime.py
+!release.json
+!labwork/
+!labwork/**
+!records/
+!records/**
+!templates/
+!templates/**
+!packaging/
+!packaging/docker/
+!packaging/docker/setup.py
+**/__pycache__
+**/tests.py

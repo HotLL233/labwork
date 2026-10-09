@@ -1,14 +1,51 @@
-# 理化检测平台
+# 理化检测平台 v0.0.1
 
-局域网内通过浏览器录入、计算、查询，并回写既有 Excel 工作簿。Microsoft Excel 和 WPS 用于查看、核对或下载后的使用；日常平台录入不需要安装客户端。
+局域网浏览器录入、计算和查询，后台串行写入 Excel。服务端采用 Django、PostgreSQL、Waitress 和 Caddy；无需独立客户端 App。
 
-项目目录：`C:\labwork`。当前完成调研与方案，尚未实现或启动业务服务。
+- [安装、使用、备份和回退](docs/v0.0.1-安装与维护.md)
+- [本版范围与验证记录](docs/v0.0.1-验证记录.md)
+- [方案 v2](docs/理化检测平台方案-v2.md)
+- [工作簿分析](docs/工作簿功能清单.csv)
 
-- [当前方案 v2](docs/理化检测平台方案-v2.md)
-- [原方案 v1](docs/理化检测平台方案-v1.md)
-- [工作簿功能清单](docs/工作簿功能清单.csv)
-- [GitHub 调研](docs/GitHub项目调研-2026-10-09.md)
+本版先实现 D006/Q 共 14 个检测方法的试用流程，12 项目统一登记。其他项目可上传、浏览和下载，方法计算与历史结构化导入待后续扩展。真实方法需核定，Excel/WPS 需副本验收；原始网盘文件没有被开发程序修改。
 
-`main` 保存当前方案；原 v1 位于分支 `archive/plan-v1`，独立工作区为 `C:\labwork\.worktrees\plan-v1`。方案版本使用 `plan/v1`、`plan/v2` 标签，尚无应用发布版本。后续功能在各自分支和 worktree 内开发，正式运行使用独立发布目录。
+## 版本隔离
 
-`tmp/`、`.worktrees/`、`releases/`、`runtime/`、虚拟环境、密钥和业务工作簿不进入 Git。开发、测试、正式环境的数据库、配置和 Excel 写入范围必须分别隔离，具体规则见 v2 方案。
+`main` 保留方案基线，应用位于 `release/v0.0.1` 分支与 `.worktrees/v0.0.1`，应用标签 `v0.0.1`。安装后程序在独立 `releases/0.0.1`，数据在 `ProgramData/Labwork`；Docker 使用持久命名卷。历史方案标签不能当成应用回退版本。
+
+## 开发与检查
+
+Python 3.12，依赖固定在 `requirements.lock`：
+
+```powershell
+uv venv --python 3.12
+uv pip sync requirements.lock
+$env:APP_ENV='test'
+.venv/Scripts/python.exe manage.py test records.tests
+.venv/Scripts/python.exe manage.py makemigrations --check --dry-run
+```
+
+开发启动使用独立运行目录，管理员密码从交互输入传入，不写入源码：
+
+```powershell
+$env:APP_ENV='dev'
+$env:WRITEBACK_ENABLED='true'
+.venv/Scripts/python.exe -c "import getpass,os,sys; os.environ['ADMIN_PASSWORD']=getpass.getpass('Initial admin password (12+ chars): '); sys.argv=['runtime.py','initialize']; import runtime; runtime.main()"
+.venv/Scripts/python.exe manage.py runserver 127.0.0.1:18811
+```
+
+另一个终端使用同一开发环境执行 `python runtime.py worker`；默认开发目录为当前工作区 `runtime/dev`，只能回写其中副本。正式环境不使用 SQLite 或 runserver。
+
+## 构建
+
+Windows：准备官方 PostgreSQL 17.11 Windows 二进制、Caddy 2.11.7、WinSW 2.12.0 和可移动 Python 3.12.13；执行 `packaging/build_windows.py --python <Python目录> --downloads <下载目录>`，再用 Inno Setup 6 `ISCC.exe packaging/labwork.iss`。下载文件名见构建脚本，组件来源和 SHA256 随安装负载记录。
+
+Docker：
+
+```powershell
+docker build -t labwork:0.0.1 .
+docker build -t labwork-postgres:17.11 -f packaging/docker/Dockerfile.postgres packaging/docker
+docker build -t labwork-gateway:0.0.1 -f packaging/docker/Dockerfile.gateway packaging/docker
+```
+
+发布文件位于 `C:\labwork\releases\v0.0.1`；运行数据、密钥、虚拟环境和工作簿不纳入 Git 或发布源码。
