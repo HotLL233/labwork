@@ -1,14 +1,16 @@
 #define Version "0.0.1"
+#define InstallerRevision "r1"
 [Setup]
 AppId={{B419AC68-C4AD-4879-B5DF-E829E3C3EB16}
 AppName=理化检测平台
 AppVersion={#Version}
+AppVerName=理化检测平台 {#Version}（Windows 修订 {#InstallerRevision}）
 AppPublisher=Labwork
 DefaultDirName={autopf}\Labwork
 DefaultGroupName=理化检测平台
 UninstallDisplayName=理化检测平台服务端
 OutputDir=..\build\installer
-OutputBaseFilename=Labwork-0.0.1-Windows-x64-Setup
+OutputBaseFilename=Labwork-0.0.1-Windows-x64-Setup-{#InstallerRevision}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
@@ -135,7 +137,7 @@ begin
   ControlScript := ExpandConstant('{app}\releases\{#Version}\app\packaging\windows\control.py');
   if not Exec(PythonExe, '"' + ControlScript + '" setup --home "' + Home + '" --request "' + RequestFile + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then begin
     DeleteFile(RequestFile);
-    RaiseException('初始化失败。程序及数据已保留，请按安装与维护说明运行检查命令查看原因。');
+    RaiseException('初始化失败，现有数据已保留。具体错误记录在 ' + Home + '\logs\setup.log。');
   end;
   Exec(ExpandConstant('{app}\LabworkService.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, Code);
   if not Exec(ExpandConstant('{app}\LabworkService.exe'), 'install', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then RaiseException('Windows 服务注册失败。');

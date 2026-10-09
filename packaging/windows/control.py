@@ -1,5 +1,6 @@
 """Windows service setup and maintenance. All business data lives outside releases."""
 import argparse
+import csv
 import ipaddress
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -18,7 +20,36 @@ PYTHON = RELEASE / 'python/python.exe'
 
 
 def run(*args, **kwargs):
+    kwargs.setdefault('stdout', sys.stdout)
+    kwargs.setdefault('stderr', sys.stderr)
     return subprocess.run([str(x) for x in args], check=True, **kwargs)
+
+
+@contextmanager
+def postgres_access(home):
+    """PostgreSQL disables the Administrators SID; allow only this installer user temporarily."""
+    import ctypes
+    if os.name != 'nt' or not ctypes.windll.shell32.IsUserAnAdmin():
+        yield
+        return
+    identity = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], check=True,
+        capture_output=True, encoding='utf-8', errors='replace')
+    sid = next(csv.reader(identity.stdout.splitlines()))[1]
+    if not re.fullmatch(r'S-\d+(?:-\d+)+', sid):
+        raise RuntimeError('无法取得安装用户的 Windows SID')
+    acl = home / 'logs' / ('.postgres-acl-' + secrets.token_hex(8))
+    helper = Path(__file__).with_name('acl.ps1')
+    script = helper.read_text(encoding='utf-8-sig')
+    acl_env = dict(os.environ, LABWORK_ACL_ROOT=str(home), LABWORK_ACL_STATE=str(acl), LABWORK_ACL_OP='save')
+    run('powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script, env=acl_env)
+    try:
+        run('icacls', home, '/grant:r', f'*{sid}:(OI)(CI)M', '/q')
+        yield
+    finally:
+        # Restore the full previous DACL, including pre-existing user entries.
+        acl_env['LABWORK_ACL_OP'] = 'restore'
+        run('powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script, env=acl_env)
+        acl.unlink()
 
 
 def read(path):
@@ -67,8 +98,7 @@ def setup(home, request_path):
             pwfile.write_text(super_password, encoding='ascii')
             try:
                 run(RELEASE / 'postgres/bin/initdb.exe', '-D', home / 'database', '-U', 'postgres',
-                    '--encoding=UTF8', '--locale=C', '--auth=scram-sha-256', f'--pwfile={pwfile}',
-                    stdout=subprocess.DEVNULL)
+                    '--encoding=UTF8', '--locale=C', '--auth=scram-sha-256', f'--pwfile={pwfile}')
             finally:
                 pwfile.unlink(missing_ok=True)
             pg_port = int(request.get('pg_port', 15432))
@@ -175,7 +205,8 @@ def main():
         with (home / 'logs/setup.log').open('a', encoding='utf-8') as logfile:
             with redirect_stdout(logfile), redirect_stderr(logfile):
                 try:
-                    setup(home, args.request)
+                    with postgres_access(home):
+                        setup(home, args.request)
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -189,7 +220,8 @@ def main():
             time.sleep(1)
         raise RuntimeError('服务未能在 50 秒内停止，请检查日志')
     elif args.command == 'backup':
-        backup(home)
+        with postgres_access(home):
+            backup(home)
     else:
         rollback(home, args.version)
 
