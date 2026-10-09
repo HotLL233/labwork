@@ -93,7 +93,7 @@ begin
   if CurPageID = SettingsPage.ID then begin
     Problem := SettingsError;
     Result := Problem = '';
-    if not Result then MsgBox(Problem, mbError, MB_OK);
+    if not Result then SuppressibleMsgBox(Problem, mbError, MB_OK, IDOK);
   end;
 end;
 
