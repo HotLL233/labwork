@@ -26,3 +26,4 @@ __pycache__/
 build/
 staticfiles/
 build-*.log
+rust-preview/target/

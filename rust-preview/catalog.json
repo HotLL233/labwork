@@ -1,0 +1,541 @@
+[
+  {
+    "code": "A3",
+    "name": "A3 理化检测",
+    "methods": []
+  },
+  {
+    "code": "D006",
+    "name": "D006 理化检测",
+    "methods": [
+      {
+        "key": "water",
+        "name": "水分",
+        "kind": "instrument",
+        "params": {},
+        "fields": [
+          {
+            "key": "result",
+            "label": "仪器水分结果",
+            "unit": "%",
+            "sample": "15"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "水分"
+      },
+      {
+        "key": "water_diluted",
+        "name": "水分（加水稀释换算）",
+        "kind": "water_diluted",
+        "params": {},
+        "fields": [
+          {
+            "key": "result",
+            "label": "稀释样水分结果",
+            "unit": "%",
+            "sample": "60"
+          },
+          {
+            "key": "original_mass",
+            "label": "原样质量",
+            "unit": "g",
+            "sample": "10"
+          },
+          {
+            "key": "total_mass",
+            "label": "加水后总质量",
+            "unit": "g",
+            "sample": "20"
+          },
+          {
+            "key": "water_result",
+            "label": "所加水水分",
+            "unit": "%",
+            "sample": "100"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "raw_result": "E",
+          "result": "F",
+          "original_mass": "G",
+          "total_mass": "H",
+          "water_result": "I"
+        },
+        "sheet": "水分"
+      },
+      {
+        "key": "total_n",
+        "name": "总氮",
+        "kind": "titration",
+        "params": {
+          "c": "0.5128",
+          "mw": "14.01",
+          "factor": "1",
+          "blank": "0.05"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "总氮"
+      },
+      {
+        "key": "ammonia_n",
+        "name": "氨氮",
+        "kind": "titration",
+        "params": {
+          "c": "0.5128",
+          "mw": "14.01",
+          "factor": "1",
+          "blank": "0.05"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "氨氮"
+      },
+      {
+        "key": "effective_cl",
+        "name": "有效氯",
+        "kind": "titration",
+        "params": {
+          "c": "0.1051",
+          "mw": "35.45",
+          "factor": "0.5",
+          "blank": "0"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "有效氯"
+      },
+      {
+        "key": "chloride",
+        "name": "氯离子",
+        "kind": "titration",
+        "params": {
+          "c": "0.1032",
+          "mw": "35.45",
+          "factor": "1",
+          "blank": "0"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "氯离子"
+      },
+      {
+        "key": "hydrogen",
+        "name": "氢离子",
+        "kind": "titration",
+        "params": {
+          "c": "0.09969",
+          "mw": "1",
+          "factor": "1",
+          "blank": "0"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "氢离子"
+      },
+      {
+        "key": "ammonia",
+        "name": "氨水",
+        "kind": "titration",
+        "params": {
+          "c": "0.5128",
+          "mw": "17.03",
+          "factor": "1",
+          "blank": "0"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "氨水"
+      }
+    ]
+  },
+  {
+    "code": "EF",
+    "name": "EF 理化检测",
+    "methods": []
+  },
+  {
+    "code": "FB01",
+    "name": "FB01 理化检测",
+    "methods": []
+  },
+  {
+    "code": "FPO",
+    "name": "FPO 理化检测",
+    "methods": []
+  },
+  {
+    "code": "J001",
+    "name": "J001 理化检测",
+    "methods": []
+  },
+  {
+    "code": "K001",
+    "name": "K001 理化检测",
+    "methods": []
+  },
+  {
+    "code": "Q",
+    "name": "Q 理化检测",
+    "methods": [
+      {
+        "key": "water",
+        "name": "水分",
+        "kind": "instrument",
+        "params": {},
+        "fields": [
+          {
+            "key": "result",
+            "label": "仪器水分结果",
+            "unit": "%",
+            "sample": "15"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "水分"
+      },
+      {
+        "key": "fluoride",
+        "name": "氟离子（两次质量稀释）",
+        "kind": "fluoride",
+        "params": {},
+        "fields": [
+          {
+            "key": "mass1",
+            "label": "一次称量",
+            "unit": "g",
+            "sample": "2"
+          },
+          {
+            "key": "total1",
+            "label": "一次稀释总质量",
+            "unit": "g",
+            "sample": "20"
+          },
+          {
+            "key": "mass2",
+            "label": "二次称量",
+            "unit": "g",
+            "sample": "5"
+          },
+          {
+            "key": "total2",
+            "label": "二次稀释总质量",
+            "unit": "g",
+            "sample": "50"
+          },
+          {
+            "key": "reading",
+            "label": "仪器示数",
+            "unit": "ppm",
+            "sample": "1.2"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass1": "C",
+          "total1": "D",
+          "mass2": "E",
+          "total2": "F",
+          "reading": "G",
+          "result": "H",
+          "percent": "I",
+          "notes": "J"
+        },
+        "sheet": "氟离子"
+      },
+      {
+        "key": "chloride",
+        "name": "氯离子",
+        "kind": "titration",
+        "params": {
+          "c": "0.1032",
+          "mw": "35.45",
+          "factor": "1",
+          "blank": "0"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "氯离子"
+      },
+      {
+        "key": "hydrogen",
+        "name": "氢离子",
+        "kind": "titration",
+        "params": {
+          "c": "0.09969",
+          "mw": "1",
+          "factor": "1",
+          "blank": "0"
+        },
+        "fields": [
+          {
+            "key": "mass",
+            "label": "称量质量",
+            "unit": "g",
+            "sample": "1"
+          },
+          {
+            "key": "volume",
+            "label": "滴定体积",
+            "unit": "mL",
+            "sample": "10"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "volume": "D",
+          "result": "E",
+          "notes": "F"
+        },
+        "sheet": "氢离子"
+      },
+      {
+        "key": "loss",
+        "name": "干燥失重",
+        "kind": "loss",
+        "params": {},
+        "fields": [
+          {
+            "key": "mass",
+            "label": "样品质量",
+            "unit": "mg",
+            "sample": "100"
+          },
+          {
+            "key": "before",
+            "label": "恒重前样品与瓶总重",
+            "unit": "mg",
+            "sample": "2000"
+          },
+          {
+            "key": "after1",
+            "label": "第一次恒重后总重",
+            "unit": "mg",
+            "sample": "1995"
+          },
+          {
+            "key": "after2",
+            "label": "第二次恒重后总重",
+            "unit": "mg",
+            "sample": "1995"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "mass": "C",
+          "before": "D",
+          "after1": "E",
+          "after2": "F",
+          "result": "G",
+          "notes": "H"
+        },
+        "sheet": "干燥失重"
+      },
+      {
+        "key": "melting",
+        "name": "熔点",
+        "kind": "melting",
+        "params": {},
+        "fields": [
+          {
+            "key": "start",
+            "label": "初熔点",
+            "unit": "℃",
+            "sample": "150"
+          },
+          {
+            "key": "end",
+            "label": "终熔点",
+            "unit": "℃",
+            "sample": "153"
+          }
+        ],
+        "columns": {
+          "date": "A",
+          "batch": "B",
+          "start": "C",
+          "end": "D"
+        },
+        "sheet": "熔点"
+      }
+    ]
+  },
+  {
+    "code": "Q007",
+    "name": "Q007 理化检测",
+    "methods": []
+  },
+  {
+    "code": "RD05",
+    "name": "RD05 理化检测",
+    "methods": []
+  },
+  {
+    "code": "S002",
+    "name": "S002 理化检测",
+    "methods": []
+  },
+  {
+    "code": "T001",
+    "name": "环糊精",
+    "methods": []
+  }
+]

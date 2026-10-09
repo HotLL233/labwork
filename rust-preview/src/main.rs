@@ -1,0 +1,153 @@
+mod calc;
+mod workbook;
+
+use axum::{Json, Router, extract::{DefaultBodyLimit, Path, State}, http::{HeaderMap, StatusCode, header}, middleware::{self, Next}, response::{Html, IntoResponse, Response}, routing::{get, post}};
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+
+type Error = (StatusCode, Json<Value>);
+fn error(message: impl ToString) -> Error { (StatusCode::BAD_REQUEST, Json(json!({"error":message.to_string()}))) }
+fn random_id() -> String { let mut b=[0;16]; getrandom::fill(&mut b).expect("Windows random source"); b.iter().map(|b|format!("{b:02x}")).collect() }
+fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Method { key: String, name: String, kind: String, params: BTreeMap<String,String>, fields: Vec<calc::Field>, columns: BTreeMap<String,String>, sheet: String }
+#[derive(Clone, Serialize, Deserialize)]
+struct Project { code: String, name: String, methods: Vec<Method> }
+struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: String }
+type Shared = Arc<Mutex<App>>;
+
+async fn local_host(request:axum::extract::Request,next:Next)->Response {
+    if !matches!(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()),Some("127.0.0.1:18802"|"localhost:18802")) {
+        return (StatusCode::FORBIDDEN,"This preview accepts localhost only").into_response();
+    }
+    let mut response=next.run(request).await;
+    response.headers_mut().insert("x-content-type-options","nosniff".parse().unwrap());
+    response.headers_mut().insert("x-frame-options","DENY".parse().unwrap());
+    response.headers_mut().insert(header::CACHE_CONTROL,"no-store".parse().unwrap());
+    response.headers_mut().insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'".parse().unwrap());
+    response
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Request { project: String, method: String, date: String, batch: String, #[serde(default)] notes: String, measurements: Vec<BTreeMap<String,String>> }
+
+impl App {
+    fn book(&self, project: &str) -> Result<PathBuf, Error> {
+        if !self.projects.iter().any(|p|p.code==project) {return Err(error("项目不存在"));}
+        let path=self.home.join("workbooks").join(format!("{project}.xlsx"));
+        if !path.exists() {return Err(error("尚未导入此项目的工作簿副本"));}
+        Ok(path)
+    }
+    fn method(&self, request: &Request) -> Result<Method,Error> {
+        self.projects.iter().find(|p|p.code==request.project).and_then(|p|p.methods.iter().find(|m|m.key==request.method)).cloned().ok_or_else(||error("此项目的方法尚未迁移"))
+    }
+}
+
+async fn index(State(state): State<Shared>) -> Html<String> {
+    let app=state.lock().unwrap();
+    Html(include_str!("../web/index.html").replace("__TOKEN__",&app.token))
+}
+async fn css() -> impl IntoResponse { ([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css")) }
+async fn js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/app.js")) }
+async fn catalog(State(state): State<Shared>) -> Json<Value> {
+    let app=state.lock().unwrap();
+    Json(json!({"version":env!("CARGO_PKG_VERSION"),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
+}
+async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,String)>) -> Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();
+    let book=app.book(&project)?;
+    let method=app.projects.iter().find(|p|p.code==project).and_then(|p|p.methods.iter().find(|m|m.key==method)).ok_or_else(||error("方法尚未支持"))?;
+    let bytes=fs::read(book).map_err(error)?;
+    let view=workbook::view(&bytes,&method.sheet,&[]).map_err(error)?;
+    Ok(Json(json!({"view":view,"next_row":workbook::next_row(&bytes,method).map_err(error)?,"fingerprint":hash(&bytes)})))
+}
+fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
+    if headers.get("x-labwork-token").and_then(|v|v.to_str().ok()) != Some(&app.token) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"页面已过期，请刷新后重试"}))));}
+    if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()) {
+        if origin!="http://127.0.0.1:18802" && origin!="http://localhost:18802" {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
+    }
+    Ok(())
+}
+async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<Request>) -> Result<Json<Value>,Error> {
+    let app=state.lock().unwrap(); authorize(&app,&headers)?;
+    let method=app.method(&request)?;
+    if request.batch.trim().is_empty() || request.batch.chars().count()>100 || request.notes.chars().count()>2000 {return Err(error("请输入批号（最多100字）；备注最多2000字"));}
+    if request.measurements.is_empty() || request.measurements.len()>2 {return Err(error("支持一至两次平行测定"));}
+    let date=chrono::NaiveDate::parse_from_str(&request.date,"%Y-%m-%d").map_err(|_|error("检测日期格式不正确"))?;
+    if !(1900..=2100).contains(&chrono::Datelike::year(&date)) {return Err(error("检测日期须为1900至2100年"));}
+    let outputs=request.measurements.iter().map(|raw|calc::calculate(&method.kind,raw,&method.params)).collect::<Result<Vec<_>,_>>().map_err(error)?;
+    let bytes=fs::read(app.book(&request.project)?).map_err(error)?;
+    let (candidate,rows)=workbook::append(&bytes,&method,&request,&outputs).map_err(error)?;
+    let view=workbook::view(&candidate,&method.sheet,&rows).map_err(error)?;
+    let id=random_id();
+    let created=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,'preview',?8)",params![id,created,serde_json::to_string(&request).unwrap(),serde_json::to_string(&outputs).unwrap(),hash(&bytes),hash(&candidate),serde_json::to_string(&rows).unwrap(),serde_json::to_string(&method).unwrap()]).map_err(error)?;
+    fs::write(app.home.join("previews").join(format!("{id}.xlsx")),candidate).map_err(error)?;
+    Ok(Json(json!({"id":id,"outputs":outputs,"rows":rows,"view":view,"state":"preview","download":format!("/api/download/{id}")})))
+}
+async fn commit(State(state):State<Shared>,headers:HeaderMap,Path(id):Path<String>) -> Result<Json<Value>,Error> {
+    let app=state.lock().unwrap(); authorize(&app,&headers)?;
+    let (raw,before,after,status):(String,String,String,String)=app.db.query_row("SELECT request,before_hash,after_hash,state FROM previews WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|_|error("预览不存在"))?;
+    let request:Request=serde_json::from_str(&raw).map_err(error)?;
+    let book=app.book(&request.project)?;
+    let current=hash(&fs::read(&book).map_err(error)?);
+    if status=="done" {return Ok(Json(json!({"state":"done","message":"已写入工作副本，无重复追加"})));}
+    if status=="writing" && current==after {
+        app.db.execute("UPDATE previews SET state='done' WHERE id=?1",[&id]).map_err(error)?;
+        return Ok(Json(json!({"state":"done","message":"已恢复中断后的写入状态"})));
+    }
+    if current!=before {return Err((StatusCode::CONFLICT,Json(json!({"error":"工作簿已经变化，请重新计算并预览；未覆盖文件"}))));}
+    let candidate=app.home.join("previews").join(format!("{id}.xlsx"));
+    let bytes=fs::read(&candidate).map_err(error)?;
+    if hash(&bytes)!=after {return Err(error("预览副本校验失败，未写入"));}
+    let backup=app.home.join("backups").join(format!("{}-{id}.xlsx",request.project));
+    fs::copy(&book,&backup).map_err(error)?;
+    if hash(&fs::read(&backup).map_err(error)?)!=before {return Err(error("写前备份校验失败"));}
+    let temp=book.with_extension(format!("{id}.tmp"));
+    fs::write(&temp,bytes).map_err(error)?;
+    if hash(&fs::read(&book).map_err(error)?)!=before {return Err(error("文件在回写期间发生变化，请重新预览"));}
+    app.db.execute("UPDATE previews SET state='writing' WHERE id=?1",[&id]).map_err(error)?;
+    // Windows rename cannot replace an existing file; use the native replacement below.
+    workbook::replace_file(&temp,&book).map_err(|e|error(format!("文件被占用或无写入权限：{e}；请关闭Excel/WPS后重试")))?;
+    app.db.execute("UPDATE previews SET state='done' WHERE id=?1",[&id]).map_err(error)?;
+    Ok(Json(json!({"state":"done","message":"已写入工作副本；原表未改动"})))
+}
+async fn download(State(state):State<Shared>,Path(id):Path<String>) -> Result<Response,Error> {
+    let app=state.lock().unwrap();
+    if id.len()!=32 || !id.bytes().all(|c|c.is_ascii_hexdigit()) {return Err(error("预览编号无效"));}
+    let bytes=fs::read(app.home.join("previews").join(format!("{id}.xlsx"))).map_err(error)?;
+    Ok(([(header::CONTENT_TYPE,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),(header::CONTENT_DISPOSITION,"attachment; filename=Labwork-preview.xlsx")],bytes).into_response())
+}
+async fn history(State(state):State<Shared>) -> Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();
+    let mut query=app.db.prepare("SELECT id,created,request,outputs,rows,state FROM previews ORDER BY created DESC,rowid DESC LIMIT 40").map_err(error)?;
+    let rows=query.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"created":r.get::<_,i64>(1)?,"request":serde_json::from_str::<Value>(&r.get::<_,String>(2)?).unwrap_or(Value::Null),"outputs":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null),"rows":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null),"state":r.get::<_,String>(5)?}))).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
+    Ok(Json(json!(rows)))
+}
+
+#[tokio::main]
+async fn main() -> Result<(),Box<dyn std::error::Error>> {
+    let args=std::env::args().collect::<Vec<_>>();
+    let home=args.windows(2).find(|v|v[0]=="--home").map(|v|PathBuf::from(&v[1])).unwrap_or(PathBuf::from("runtime/rust-preview"));
+    let marker=home.join(".labwork-rust-preview");
+    if home.exists() && !marker.exists() && fs::read_dir(&home)?.next().is_some() {return Err("拒绝使用已有且未标记的目录；请使用独立预览目录".into());}
+    fs::create_dir_all(&home)?; fs::write(&marker,"0.0.2-alpha.1; local preview only")?;
+    for folder in ["workbooks","previews","backups"] {fs::create_dir_all(home.join(folder))?;}
+    let db=Connection::open(home.join("preview.sqlite3"))?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
+    let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id()}));
+    let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js))
+        .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
+        .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))
+        .layer(DefaultBodyLimit::max(64*1024)).layer(middleware::from_fn(local_host)).with_state(state);
+    // This validation build intentionally cannot bind to a LAN interface before account migration.
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:18802").await?;
+    println!("Rust + SQLite validation: http://127.0.0.1:18802 ; Ctrl+C to stop");
+    axum::serve(listener,router).with_graceful_shutdown(async{let _=tokio::signal::ctrl_c().await;}).await?;
+    Ok(())
+}
