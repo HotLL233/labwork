@@ -1,0 +1,25 @@
+# Research scratch files and isolated Git worktrees
+/tmp/
+/.worktrees/
+
+# Released code copies and environment-specific business files
+/releases/
+/runtime/
+
+# Python environments, local settings and caches
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+
+# Workbooks, shortcuts and local databases are never source code
+*.xlsx
+*.xls
+*.xlsm
+*.lnk
+*.sqlite
+*.sqlite3
+*.sqlite3-*
