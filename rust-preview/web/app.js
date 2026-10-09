@@ -7,7 +7,8 @@ const today=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMon
 const keys=()=>['date','batch',...method.fields.map(f=>f.key),'notes'];
 const fields=()=>[{key:'date',label:'检测日期',unit:''},{key:'batch',label:'样品批号',unit:''},...method.fields,{key:'notes',label:'备注',unit:''}];
 const emptyRow=()=>({date:LabGrid.labels(rows).at(-1)?.date||today(),batch:LabGrid.labels(rows).at(-1)?.batch||'',notes:''});
-async function api(path,body){const response=await fetch(path,{headers:body?{'Content-Type':'application/json','X-Labwork-Token':token}:{},method:body?'POST':'GET',body:body?JSON.stringify(body):undefined});const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data;}
+async function responseData(response){if(response.status===401){location.assign('/login');throw Error('请登录后继续');}const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data;}
+async function api(path,body){const response=await fetch(path,{headers:body?{'Content-Type':'application/json','X-Labwork-Token':token}:{},method:body?'POST':'GET',body:body?JSON.stringify(body):undefined});return responseData(response);}
 function message(text,success=false){$('message').hidden=false;$('message').textContent=text;$('message').className=success?'success':'';}
 function invalidate(){const hadPreview=previewId;previewId=null;inputVersion++;$('commit').disabled=true;$('download').hidden=true;$('results').hidden=true;$('sheet-status').textContent='输入已更改，请重新预览';if(hadPreview&&baseView)sheet(baseView,true);}
 function remember(){undo.push(rows.map(r=>({...r})));if(undo.length>30)undo.shift();}
@@ -76,18 +77,18 @@ function sheet(view,draft=false){
   $('sheet-note').textContent=`原表至第 ${view.last_row} 行 · 绿色为本次拟追加 · 同组日期/批号仅首行填写`;bindInputs();markSelection();
 }
 async function selectMethod(key){
-  if(busy)return;method=project.methods.find(m=>m.key===key);rows=[{date:today(),batch:'',notes:''}];undo=[];selection=null;anchor=null;baseView=null;invalidate();$('message').hidden=true;
+  if(busy||!project?.available)return;method=project.methods.find(m=>m.key===key);rows=[{date:today(),batch:'',notes:''}];undo=[];selection=null;anchor=null;baseView=null;invalidate();$('message').hidden=true;
   $('title').textContent=method.name;$('breadcrumb').textContent=`检测项目 / ${project.code} / ${method.name}`;
   document.querySelectorAll('#methods button').forEach(b=>b.classList.toggle('active',b.dataset.key===key));
   $('parameters').textContent='候选参数：'+(Object.entries(method.params).map(([k,v])=>`${k}=${v}`).join('，')||'仪器/质量换算');entry();
   const code=project.code;
-  try{const data=await api(`/api/sheet/${encodeURIComponent(code)}/${encodeURIComponent(key)}`);if(project.code!==code||method.key!==key)return;nextRow=data.next_row;baseView=data.view;sheet(baseView,true);$('sheet-status').textContent='原表副本已加载，黄色为本次输入';}catch(e){message(e.message);}
+  try{const data=await api(`/api/sheet/${encodeURIComponent(code)}/${encodeURIComponent(key)}`);if(busy||project.code!==code||method?.key!==key)return;nextRow=data.next_row;baseView=data.view;sheet(baseView,true);$('sheet-status').textContent='原表副本已加载，黄色为本次输入';}catch(e){message(e.message);}
 }
 async function selectProject(code){
-  if(busy)return;project=catalog.find(p=>p.code===code);document.querySelectorAll('#projects button').forEach(b=>b.classList.toggle('active',b.dataset.code===code));
-  $('methods').innerHTML=project.methods.map(m=>`<button data-key="${m.key}">${escape(m.name)}</button>`).join('');$('methods').querySelectorAll('button').forEach(b=>b.onclick=()=>selectMethod(b.dataset.key));
-  const supported=project.available&&project.methods.length;['calculate','parallel','add-batch','sample','remove-row','fill-down','fill-end'].forEach(id=>$(id).disabled=!supported);
-  if(supported)await selectMethod(project.methods[0].key);else{method=null;baseView=null;selection=null;invalidate();$('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('title').textContent=project.name;$('breadcrumb').textContent=`检测项目 / ${code}`;message('此项目的方法尚未迁移，当前覆盖 D006 / Q。');}
+  if(busy)return;$('workbook-file').value='';project=catalog.find(p=>p.code===code);document.querySelectorAll('#projects button').forEach(b=>b.classList.toggle('active',b.dataset.code===code));
+  $('methods').innerHTML=project.methods.map(m=>`<button data-key="${m.key}">${escape(m.name)}</button>`).join('');$('methods').querySelectorAll('button').forEach(b=>{b.disabled=!project.available;b.onclick=()=>selectMethod(b.dataset.key);});
+  workbookStatus();const supported=project.available&&project.methods.length;['calculate','parallel','add-batch','sample','remove-row','fill-down','fill-end'].forEach(id=>$(id).disabled=!supported);
+  if(supported)await selectMethod(project.methods[0].key);else{method=null;baseView=null;selection=null;invalidate();$('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('title').textContent=project.name;$('breadcrumb').textContent=`检测项目 / ${code}`;message(project.methods.length?'请先导入此项目的工作簿副本，再选择检测方法。':'此项目的方法尚未迁移，当前覆盖 D006 / Q。');}
 }
 $('calculate').onclick=async()=>{
   if(busy||!method)return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在计算全部批号…';const version=inputVersion;
@@ -103,4 +104,35 @@ $('reset').onclick=()=>{if(busy||!method)return;selection=null;anchor=null;chang
 $('undo').onclick=()=>{if(busy||!undo.length)return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();};
 $('mobile-preview').onclick=()=>{$('sheet-scroll').scrollIntoView({behavior:'smooth',block:'center'});};
 $('history-button').onclick=async()=>{try{const data=await api('/api/history');$('history').hidden=!$('history').hidden;$('history').innerHTML=`<h3>预览与写入历史</h3><table><thead><tr><th>项目 / 方法</th><th>批号</th><th>结果</th><th>目标行</th><th>状态</th></tr></thead><tbody>${data.map(r=>`<tr><td>${escape(r.request.project)} / ${escape(r.request.method)}</td><td>${escape([...new Set(r.request.entries?.map(e=>e.batch)||[r.request.batch])].join(' / '))}</td><td>${r.outputs.map(o=>escape(o.display)+' '+escape(o.unit)).join(' / ')}</td><td>${r.rows[0]}–${r.rows.at(-1)}</td><td>${r.state==='done'?'已写入':r.state==='writing'?'写入待恢复':'仅预览'}</td></tr>`).join('')}</tbody></table>`;}catch(e){message(e.message);}};
-(async()=>{try{const data=await api('/api/catalog');catalog=data.projects;$('instance-info').textContent='当前版本 '+data.version+' · '+data.port+' · 数据目录：'+data.data_directory;$('projects').innerHTML=catalog.map(p=>`<button data-code="${p.code}"><span class="project-code">${p.code}</span><span class="project-count">${p.methods.length||'待接入'}</span></button>`).join('');$('projects').querySelectorAll('button').forEach(b=>b.onclick=()=>selectProject(b.dataset.code));await selectProject('D006');}catch(e){message(e.message);}})();
+function workbookStatus(){
+  const supported=!!project?.methods.length,available=!!project?.available;
+  $('workbook-status').textContent=!supported?'此项目的方法尚未接入，暂不支持导入。':available?'已绑定工作簿副本，可以选择方法录入。':'尚未绑定工作簿，请选择此项目的原表导入。';
+  $('workbook-file').disabled=busy||!supported||available;
+  $('import-workbook').disabled=busy||!supported||available||!$('workbook-file').files.length;
+}
+$('workbook-file').onchange=workbookStatus;
+async function loadCatalog(){
+  const data=await api('/api/catalog');catalog=data.projects;
+  $('instance-info').textContent='当前版本 '+data.version+' · '+data.port+' · 数据目录：'+data.data_directory;
+  $('lan-info').textContent=data.lan_url?'局域网访问地址：'+data.lan_url:'局域网访问尚未启用，请在服务器配置中开启。';
+  $('projects').innerHTML=catalog.map(p=>`<button data-code="${escape(p.code)}"><span class="project-code">${escape(p.code)}</span><span class="project-count">${p.methods.length||'待接入'}</span></button>`).join('');
+  $('projects').querySelectorAll('button').forEach(b=>b.onclick=()=>selectProject(b.dataset.code));
+}
+$('import-workbook').onclick=async()=>{
+  if(busy||!project?.methods.length||project.available)return;
+  const file=$('workbook-file').files[0];if(!file)return;
+  if(!/\.xlsx$/i.test(file.name)||!file.size||file.size>20*1024*1024){message('请选择不超过20 MB的非空 .xlsx 工作簿。');return;}
+  const code=project.code,key=method?.key;
+  busy=true;writing=true;invalidate();
+  const controls=[...document.querySelectorAll('button,input,select')].map(el=>[el,el.disabled]);
+  controls.forEach(([el])=>el.disabled=true);$('workbook-status').textContent='正在导入并检查工作簿，请稍候…';
+  let imported=false;
+  try{
+    await responseData(await fetch('/api/workbook/'+encodeURIComponent(code),{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Labwork-Token':token},body:file}));
+    project.available=true;await loadCatalog();imported=true;$('workbook-file').value='';
+  }catch(e){message(e.message);}
+  finally{busy=false;writing=false;controls.forEach(([el,disabled])=>el.disabled=disabled);}
+  if(imported){await selectProject(code);if(key&&project.methods.some(m=>m.key===key))await selectMethod(key);message('工作簿副本导入成功，原文件未修改。',true);}
+  workbookStatus();
+};
+(async()=>{try{await loadCatalog();await selectProject('D006');}catch(e){message(e.message);}})();

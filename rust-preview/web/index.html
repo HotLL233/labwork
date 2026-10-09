@@ -1,7 +1,8 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="labwork-token" content="__TOKEN__"><title>理化检测平台 · 表格录入</title><link rel="stylesheet" href="/app.css"><script src="/grid.js" defer></script><script src="/app.js" defer></script></head><body>
-<header class="top"><div class="logo">▦</div><strong>理化检测平台</strong><span class="version">Rust __VERSION__ · __PORT__</span><div class="top-right">工作簿副本 <span class="dot"></span><span>本机验证</span></div></header>
-<div class="app"><aside class="sidebar"><div class="side-title">检测项目</div><div id="projects"></div><div class="side-foot">先选择项目，再选择检测方法<br>当前验证 D006 / Q</div></aside><main>
+<header class="top"><div class="logo">▦</div><strong>理化检测平台</strong><span class="version">Rust __VERSION__ · __PORT__</span><div class="top-right">工作簿副本 <span class="dot"></span><span>内网试用</span></div></header>
+<div class="app"><aside class="sidebar"><div class="side-title">检测项目</div><div id="projects"></div><div class="side-foot">先选择项目，再选择检测方法<br>当前支持 D006 / Q</div></aside><main>
 <div class="heading"><div><div class="breadcrumb" id="breadcrumb">检测项目 / D006</div><h1 id="title">请选择检测方法</h1></div><button id="history-button" class="quiet">预览与写入历史</button></div>
+<section class="workbook-import" aria-label="项目工作簿"><div><strong>项目工作簿</strong><p id="workbook-status" role="status">请选择项目</p><small>仅支持 .xlsx，最大 20 MB。导入保存独立副本，不修改原件；已有绑定不能覆盖。</small></div><label class="file-choice">选择工作簿<input id="workbook-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled></label><button id="import-workbook" disabled>导入工作簿副本</button></section><div class="notice" id="lan-info" role="status"></div>
 <nav class="methods" id="methods" aria-label="检测方法"></nav>
 <div class="ribbon"><div><span class="ribbon-tab active">检测录入</span><span class="ribbon-tab">原表预览</span><span class="ribbon-tab">计算结果</span></div><div class="ribbon-actions"><button id="calculate" class="primary">计算并预览写入</button><button id="commit" disabled>确认写入工作副本</button><a id="download" class="button" hidden>下载预览 Excel</a><button id="reset" class="quiet">清空本次输入</button></div></div>
 <div class="notice" role="status">本页使用独立工作簿副本。计算预览不写入文件；确认后追加新行、整理目标表中相邻重复的日期/批号，并保存备份。方法参数仍需业务核定。</div>
@@ -12,5 +13,5 @@
 <div id="message" role="alert" hidden></div>
 <section class="results" id="results" hidden></section>
 <section class="sheet-panel"><div class="formula-bar"><span id="cell-address">A1</span><span class="fx">fx</span><input id="formula-value" aria-label="所选单元格内容或公式" readonly placeholder="点击下方单元格，查看原始内容和公式"><button id="mobile-preview" class="quiet">原表视图</button></div><div class="sheet-toolbar"><span id="sheet-label">原表布局预览</span><span class="muted" id="sheet-note">保留列宽、行高、合并和样式</span></div><div class="sheet-scroll" id="sheet-scroll"><table id="sheet" aria-label="Excel工作表预览"></table></div><div class="sheet-tabs"><span class="sheet-nav">◂ ▸</span><div id="sheet-tabs"></div><span class="sheet-status" id="sheet-status">就绪</span></div></section>
-<section id="history" hidden></section><footer><span id="parameters"></span><span>Rust + SQLite · __VERSION__ · 独立验证版</span></footer>
+<section id="history" hidden></section><footer><span id="parameters"></span><span>Rust + SQLite · __VERSION__ · 内网试用版</span></footer>
 </main></div></body></html>

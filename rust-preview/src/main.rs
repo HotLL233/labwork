@@ -1,5 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod config;
+mod auth;
+mod import;
 mod calc;
 mod workbook;
 #[cfg(windows)]
@@ -21,13 +23,13 @@ fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 struct Method { key: String, name: String, kind: String, params: BTreeMap<String,String>, fields: Vec<calc::Field>, columns: BTreeMap<String,String>, sheet: String }
 #[derive(Clone, Serialize, Deserialize)]
 struct Project { code: String, name: String, methods: Vec<Method> }
-struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: String, port: u16 }
+struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: String, port: u16, lan_ip: String, access: auth::Access }
 type Shared = Arc<Mutex<App>>;
 
 async fn local_host(State(state):State<Shared>,request:axum::extract::Request,next:Next)->Response {
-    let port=state.lock().unwrap().port;
-    if !config::allowed_host(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()).unwrap_or(""),port) {
-        return (StatusCode::FORBIDDEN,"This preview accepts localhost only").into_response();
+    let allowed=state.lock().unwrap().allowed_host(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()).unwrap_or(""));
+    if !allowed {
+        return (StatusCode::FORBIDDEN,"访问地址与服务器配置不一致").into_response();
     }
     let mut response=next.run(request).await;
     response.headers_mut().insert("x-content-type-options","nosniff".parse().unwrap());
@@ -63,6 +65,11 @@ impl Request {
 }
 
 impl App {
+    fn allowed_host(&self,host:&str)->bool {
+        config::allowed_host(host,self.port) || (!self.lan_ip.is_empty() && host==format!("{}:{}",self.lan_ip,self.port))
+    }
+    fn allowed_origin(&self,origin:&str)->bool {origin.strip_prefix("http://").is_some_and(|host|self.allowed_host(host))}
+
     fn book(&self, project: &str) -> Result<PathBuf, Error> {
         if !self.projects.iter().any(|p|p.code==project) {return Err(error("项目不存在"));}
         let path=self.home.join("workbooks").join(format!("{project}.xlsx"));
@@ -83,7 +90,13 @@ async fn js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javasc
 async fn grid_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/grid.js")) }
 async fn catalog(State(state): State<Shared>) -> Json<Value> {
     let app=state.lock().unwrap();
-    Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"data_directory":app.home.canonicalize().unwrap_or_else(|_|app.home.clone()).display().to_string(),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
+    Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"lan_url":if app.lan_ip.is_empty(){None}else{Some(format!("http://{}:{}",app.lan_ip,app.port))},"data_directory":app.home.canonicalize().unwrap_or_else(|_|app.home.clone()).display().to_string(),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
+}
+async fn bind_workbook(State(state):State<Shared>,Path(project):Path<String>,headers:HeaderMap,body:axum::body::Bytes)->Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();
+    authorize(&app,&headers)?;
+    let project=app.projects.iter().find(|p|p.code==project).ok_or_else(||error("项目不存在"))?;
+    import::bind(&app.home,project,&body).map(Json)
 }
 async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,String)>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap();
@@ -96,7 +109,7 @@ async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,S
 fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
     if headers.get("x-labwork-token").and_then(|v|v.to_str().ok()) != Some(&app.token) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"页面已过期，请刷新后重试"}))));}
     if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()) {
-        if !origin.strip_prefix("http://").is_some_and(|host|config::allowed_host(host,app.port)) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
+        if !app.allowed_origin(origin) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
     }
     Ok(())
 }
@@ -169,10 +182,19 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let settings=config::load()?;
     let port=settings.port;
     let home=settings.data_dir;
-    let listener=tokio::net::TcpListener::bind(("127.0.0.1",port)).await.map_err(|e|format!("理化检测平台启动失败：端口 {port} 无法使用（{e}）。请检查是否已经运行，或修改 labwork.json 中的端口。"))?;
+    let lan_ip=settings.lan_ip;
+    let access=auth::Access::new(if lan_ip.is_empty(){None}else{Some(&settings.access_password)});
+    let listener=tokio::net::TcpListener::bind((if lan_ip.is_empty(){"127.0.0.1"}else{"0.0.0.0"},port)).await.map_err(|e|format!("理化检测平台启动失败：端口 {port} 无法使用（{e}）。请检查是否已经运行，或修改 labwork.json 中的端口。"))?;
     let marker=home.join(".labwork-rust-preview");
     if home.exists() && !marker.exists() && fs::read_dir(&home)?.next().is_some() {return Err("拒绝使用已有且未标记的目录；请使用独立预览目录".into());}
-    fs::create_dir_all(&home)?; fs::write(&marker,"0.0.2-alpha.1; local preview only")?;
+    fs::create_dir_all(&home)?;
+    #[cfg(windows)]
+    let _data_lock={
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new().write(true).create(true).truncate(false).share_mode(0).open(home.join(".running.lock"))
+            .map_err(|e|format!("数据目录正在被其他实例使用或无法写入，请先退出旧版平台：{e}"))?
+    };
+    fs::write(&marker,"0.0.2-alpha.1; local preview only")?;
     for folder in ["workbooks","previews","backups"] {fs::create_dir_all(home.join(folder))?;}
     let db=Connection::open(home.join("preview.sqlite3"))?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -182,12 +204,13 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let _tray=if tray_mode {Some(tray::start(home.clone(),port,shutdown_tx)?)}else{drop(shutdown_tx);None};
     #[cfg(not(windows))]
     if tray_mode {return Err("托盘模式仅支持Windows".into());}
-    let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id(),port}));
+    let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id(),port,lan_ip,access}));
     let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js)).route("/grid.js",get(grid_js))
+        .route("/login",get(auth::page)).route("/login.js",get(auth::script)).route("/api/login",post(auth::login))
+        .route("/api/workbook/{project}",post(bind_workbook).layer(DefaultBodyLimit::max(import::MAX_BYTES)))
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
         .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))
-        .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn_with_state(state.clone(),local_host)).with_state(state);
-    // This validation build intentionally cannot bind to a LAN interface before account migration.
+        .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn_with_state(state.clone(),auth::guard)).layer(middleware::from_fn_with_state(state.clone(),local_host)).with_state(state);
     println!("Rust + SQLite validation: http://127.0.0.1:{port} ; Ctrl+C to stop");
     axum::serve(listener,router).with_graceful_shutdown(async move {
         if tray_mode {let _=shutdown_rx.await;}
