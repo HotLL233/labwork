@@ -1,5 +1,5 @@
 #define Version "0.0.1"
-#define InstallerRevision "r1"
+#define InstallerRevision "r2"
 [Setup]
 AppId={{B419AC68-C4AD-4879-B5DF-E829E3C3EB16}
 AppName=理化检测平台
@@ -98,6 +98,11 @@ begin
   Result := True;
   if CurPageID = ConfigPage.ID then begin
     Port := StrToIntDef(ConfigPage.Values[1], 0);
+    if Trim(ConfigPage.Values[0]) = '0.0.0.0' then begin
+      MsgBox('0.0.0.0 是监听地址。请填写服务器实际内网 IPv4 或域名，例如本机以太网地址。', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
     if (ConfigPage.Values[0] = '') or (Port < 1024) or (Port > 65535) or (ConfigPage.Values[2] = '') then begin
       MsgBox('请填写服务器地址、局域网范围和有效端口。', mbError, MB_OK);
       Result := False;

@@ -75,6 +75,8 @@ def setup(home, request_path):
     request = read(request_path)
     try:
         host = request['host'].strip()
+        if host == '0.0.0.0':
+            raise ValueError('0.0.0.0 是监听地址；请填写服务器实际内网 IPv4 或域名')
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.\-]{0,252}', host):
             raise ValueError('服务器地址格式不正确')
         port = int(request['port'])
@@ -141,7 +143,7 @@ def setup(home, request_path):
             'home': home, 'logs': home / 'logs', 'supervisor': APP / 'packaging/windows/supervisor.py'}.items()}
         service = r'''<service>
   <id>Labwork</id><name>理化检测平台</name><description>局域网理化检测、计算与工作簿回写</description>
-  <executable>{python}</executable><arguments>"{supervisor}" --home "{home}"</arguments>
+  <executable>{python}</executable><startarguments>"{supervisor}" --home "{home}"</startarguments>
   <stopexecutable>{python}</stopexecutable><stoparguments>"{script}" shutdown --home "{home}"</stoparguments>
   <serviceaccount><username>NT AUTHORITY\LocalService</username></serviceaccount>
   <startmode>Automatic</startmode><stoptimeout>60 sec</stoptimeout>
