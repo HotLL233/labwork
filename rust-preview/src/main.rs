@@ -21,7 +21,7 @@ struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: Strin
 type Shared = Arc<Mutex<App>>;
 
 async fn local_host(request:axum::extract::Request,next:Next)->Response {
-    if !matches!(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()),Some("127.0.0.1:18802"|"localhost:18802")) {
+    if !matches!(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()),Some("127.0.0.1:18804"|"localhost:18804")) {
         return (StatusCode::FORBIDDEN,"This preview accepts localhost only").into_response();
     }
     let mut response=next.run(request).await;
@@ -33,7 +33,29 @@ async fn local_host(request:axum::extract::Request,next:Next)->Response {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct Request { project: String, method: String, date: String, batch: String, #[serde(default)] notes: String, measurements: Vec<BTreeMap<String,String>> }
+struct Request { project: String, method: String, #[serde(default)] date: String, #[serde(default)] batch: String, #[serde(default)] notes: String, #[serde(default)] measurements: Vec<BTreeMap<String,String>>, #[serde(default)] entries: Vec<Entry> }
+#[derive(Serialize, Deserialize, Clone)]
+struct Entry { date: String, batch: String, #[serde(default)] notes: String, measurement: BTreeMap<String,String> }
+impl Request {
+    fn normalize(&mut self) -> Result<(),String> {
+        if !self.entries.is_empty() && !self.measurements.is_empty() {return Err("不能同时提交旧版测定和批量行".into());}
+        if self.entries.is_empty() {self.entries=self.measurements.iter().map(|m|Entry{date:self.date.clone(),batch:self.batch.clone(),notes:self.notes.clone(),measurement:m.clone()}).collect();}
+        if self.entries.is_empty()||self.entries.len()>200 {return Err("每次支持1至200行测定".into());}
+        for (i,row) in self.entries.iter_mut().enumerate() {
+            row.batch=row.batch.trim().to_owned();
+            if row.batch.is_empty()||row.batch.chars().count()>100||row.notes.chars().count()>2000 {return Err(format!("第{}行：批号须为1至100字，备注最多2000字",i+1));}
+            let date=chrono::NaiveDate::parse_from_str(&row.date,"%Y-%m-%d").map_err(|_|format!("第{}行：检测日期无效",i+1))?;
+            if !(1900..=2100).contains(&chrono::Datelike::year(&date)) {return Err("检测日期须为1900至2100年".into());}
+            row.date=date.to_string();
+        }
+        // Keep each day's batches together so blank labels always have one unambiguous owner.
+        let mut groups=Vec::<(String,String)>::new();
+        for row in &self.entries {let key=(row.date.clone(),row.batch.clone());if !groups.contains(&key){groups.push(key);}}
+        self.entries.sort_by_key(|r|(r.date.clone(),groups.iter().position(|g|g==&(r.date.clone(),r.batch.clone())).unwrap()));
+        self.measurements.clear();
+        Ok(())
+    }
+}
 
 impl App {
     fn book(&self, project: &str) -> Result<PathBuf, Error> {
@@ -53,6 +75,7 @@ async fn index(State(state): State<Shared>) -> Html<String> {
 }
 async fn css() -> impl IntoResponse { ([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css")) }
 async fn js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/app.js")) }
+async fn grid_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/grid.js")) }
 async fn catalog(State(state): State<Shared>) -> Json<Value> {
     let app=state.lock().unwrap();
     Json(json!({"version":env!("CARGO_PKG_VERSION"),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
@@ -62,32 +85,29 @@ async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,S
     let book=app.book(&project)?;
     let method=app.projects.iter().find(|p|p.code==project).and_then(|p|p.methods.iter().find(|m|m.key==method)).ok_or_else(||error("方法尚未支持"))?;
     let bytes=fs::read(book).map_err(error)?;
-    let view=workbook::view(&bytes,&method.sheet,&[]).map_err(error)?;
+    let view=workbook::view(&bytes,method,&[]).map_err(error)?;
     Ok(Json(json!({"view":view,"next_row":workbook::next_row(&bytes,method).map_err(error)?,"fingerprint":hash(&bytes)})))
 }
 fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
     if headers.get("x-labwork-token").and_then(|v|v.to_str().ok()) != Some(&app.token) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"页面已过期，请刷新后重试"}))));}
     if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()) {
-        if origin!="http://127.0.0.1:18802" && origin!="http://localhost:18802" {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
+        if origin!="http://127.0.0.1:18804" && origin!="http://localhost:18804" {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
     }
     Ok(())
 }
-async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<Request>) -> Result<Json<Value>,Error> {
+async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):Json<Request>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap(); authorize(&app,&headers)?;
     let method=app.method(&request)?;
-    if request.batch.trim().is_empty() || request.batch.chars().count()>100 || request.notes.chars().count()>2000 {return Err(error("请输入批号（最多100字）；备注最多2000字"));}
-    if request.measurements.is_empty() || request.measurements.len()>2 {return Err(error("支持一至两次平行测定"));}
-    let date=chrono::NaiveDate::parse_from_str(&request.date,"%Y-%m-%d").map_err(|_|error("检测日期格式不正确"))?;
-    if !(1900..=2100).contains(&chrono::Datelike::year(&date)) {return Err(error("检测日期须为1900至2100年"));}
-    let outputs=request.measurements.iter().map(|raw|calc::calculate(&method.kind,raw,&method.params)).collect::<Result<Vec<_>,_>>().map_err(error)?;
+    request.normalize().map_err(error)?;
+    let outputs=request.entries.iter().enumerate().map(|(i,row)|calc::calculate(&method.kind,&row.measurement,&method.params).map_err(|e|format!("第{}行（{}）：{e}",i+1,row.batch))).collect::<Result<Vec<_>,_>>().map_err(error)?;
     let bytes=fs::read(app.book(&request.project)?).map_err(error)?;
     let (candidate,rows)=workbook::append(&bytes,&method,&request,&outputs).map_err(error)?;
-    let view=workbook::view(&candidate,&method.sheet,&rows).map_err(error)?;
+    let view=workbook::view(&candidate,&method,&rows).map_err(error)?;
     let id=random_id();
     let created=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,'preview',?8)",params![id,created,serde_json::to_string(&request).unwrap(),serde_json::to_string(&outputs).unwrap(),hash(&bytes),hash(&candidate),serde_json::to_string(&rows).unwrap(),serde_json::to_string(&method).unwrap()]).map_err(error)?;
     fs::write(app.home.join("previews").join(format!("{id}.xlsx")),candidate).map_err(error)?;
-    Ok(Json(json!({"id":id,"outputs":outputs,"rows":rows,"view":view,"state":"preview","download":format!("/api/download/{id}")})))
+    Ok(Json(json!({"id":id,"entries":request.entries,"outputs":outputs,"rows":rows,"view":view,"state":"preview","download":format!("/api/download/{id}")})))
 }
 async fn commit(State(state):State<Shared>,headers:HeaderMap,Path(id):Path<String>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap(); authorize(&app,&headers)?;
@@ -141,13 +161,13 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
     let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id()}));
-    let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js))
+    let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js)).route("/grid.js",get(grid_js))
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
         .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))
-        .layer(DefaultBodyLimit::max(64*1024)).layer(middleware::from_fn(local_host)).with_state(state);
+        .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn(local_host)).with_state(state);
     // This validation build intentionally cannot bind to a LAN interface before account migration.
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:18802").await?;
-    println!("Rust + SQLite validation: http://127.0.0.1:18802 ; Ctrl+C to stop");
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:18804").await?;
+    println!("Rust + SQLite validation: http://127.0.0.1:18804 ; Ctrl+C to stop");
     axum::serve(listener,router).with_graceful_shutdown(async{let _=tokio::signal::ctrl_c().await;}).await?;
     Ok(())
 }

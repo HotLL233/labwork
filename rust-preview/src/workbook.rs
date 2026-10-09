@@ -6,7 +6,7 @@ use xmltree::{Element, XMLNode};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const MAIN:&str="http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-struct Book {parts:BTreeMap<String,Vec<u8>>,strings:Vec<String>,sheets:BTreeMap<String,String>}
+struct Book {parts:BTreeMap<String,Vec<u8>>,strings:Vec<String>,sheets:BTreeMap<String,String>,date1904:bool}
 fn text(n:Node<'_, '_>)->String {n.descendants().filter(|n|n.is_element()&&n.tag_name().name()=="t").filter_map(|n|n.text()).collect()}
 fn attr(n:Node<'_, '_>,key:&str)->String {n.attribute(key).unwrap_or("").to_owned()}
 fn doc(bytes:&[u8])->Result<Document<'_>,String>{Document::parse(std::str::from_utf8(bytes).map_err(|_|"XML编码不支持")?).map_err(|_|"工作簿XML无效".into())}
@@ -36,7 +36,8 @@ fn read(bytes:&[u8])->Result<Book,String>{
         if !target.starts_with("xl/worksheets/")||!parts.contains_key(&target){return Err("工作表链接无效".into());}
         sheets.insert(attr(n,"name"),target);
     }
-    Ok(Book{parts,strings,sheets})
+    let date1904=book.descendants().any(|n|n.has_tag_name("workbookPr")&&matches!(n.attribute("date1904"),Some("1"|"true")));
+    Ok(Book{parts,strings,sheets,date1904})
 }
 fn target<'a>(book:&'a Book,name:&str)->Result<&'a String,String>{
     let matches=book.sheets.iter().filter(|(s,_)|s.trim()==name.trim()).collect::<Vec<_>>();
@@ -78,6 +79,7 @@ fn styles(book:&Book)->Result<(Vec<Value>,Vec<String>),String>{
     let entries=|name:&str|root.children().find(|n|n.has_tag_name(name)).map(|n|n.children().filter(Node::is_element).collect::<Vec<_>>()).unwrap_or_default();
     let fonts=entries("fonts");let fills=entries("fills");let borders=entries("borders");
     let mut formats=BTreeMap::from([(0,"General".to_owned()),(2,"0.00".into()),(9,"0%".into()),(10,"0.00%".into()),(14,"yyyy-mm-dd".into()),(15,"yyyy-mm-dd".into()),(16,"mm-dd".into()),(17,"yyyy-mm".into()),(22,"yyyy-mm-dd hh:mm".into())]);
+    for id in [27,28,29,30,31,34,35,36,50,51,52,53,54,57,58] {formats.insert(id,"yyyy-mm-dd".into());}
     for n in entries("numFmts"){if let Ok(id)=attr(n,"numFmtId").parse::<u32>(){formats.insert(id,attr(n,"formatCode"));}}
     let mut css=Vec::new();let mut num=Vec::new();
     for xf in entries("cellXfs"){
@@ -105,17 +107,38 @@ fn styles(book:&Book)->Result<(Vec<Value>,Vec<String>),String>{
         css.push(style);num.push(formats.get(&xf.attribute("numFmtId").unwrap_or("0").parse::<u32>().unwrap_or(0)).cloned().unwrap_or("General".into()));
     }if css.is_empty(){css.push(json!({}));num.push("General".into());}Ok((css,num))
 }
-fn display(value:&str,format:&str,numeric:bool)->String{
+fn is_date_format(format:&str)->bool {
+    let (mut quoted,mut bracket,mut skip)=(false,false,false);let mut tokens=String::new();
+    for c in format.to_lowercase().chars() {
+        if skip {skip=false;continue;}
+        if c=='"' {quoted=!quoted;continue;}
+        if quoted {continue;}
+        if c=='[' {bracket=true;continue;}if c==']' {bracket=false;continue;}if bracket {continue;}
+        if matches!(c,'\\'|'_'|'*') {skip=true;continue;}
+        tokens.push(c);
+    }
+    (tokens.contains('y')||tokens.contains('d'))&&tokens.contains('m')
+}
+fn date_serial(date:chrono::NaiveDate,date1904:bool)->i64 {
+    let base=if date1904 {chrono::NaiveDate::from_ymd_opt(1904,1,1).unwrap()}else if date<chrono::NaiveDate::from_ymd_opt(1900,3,1).unwrap(){chrono::NaiveDate::from_ymd_opt(1899,12,31).unwrap()}else{chrono::NaiveDate::from_ymd_opt(1899,12,30).unwrap()};
+    (date-base).num_days()
+}
+fn serial_date(n:i64,date1904:bool)->Option<chrono::NaiveDate> {
+    let base=if date1904{chrono::NaiveDate::from_ymd_opt(1904,1,1)?}else if n<60{chrono::NaiveDate::from_ymd_opt(1899,12,31)?}else{chrono::NaiveDate::from_ymd_opt(1899,12,30)?};
+    base.checked_add_signed(chrono::Duration::try_days(n)?)
+}
+fn display(value:&str,format:&str,numeric:bool,date1904:bool)->String{
     if !numeric||value.is_empty(){return value.into();}let Ok(mut n)=value.parse::<f64>()else{return value.into()};
     if !n.is_finite(){return value.into();}
     let lower=format.to_lowercase();
-    if lower.contains('m')&&lower.contains('d')&&n>=0.&&n<73416.{if let Some(date)=chrono::NaiveDate::from_ymd_opt(1899,12,30).unwrap().checked_add_days(chrono::Days::new(n as u64)){return if lower.contains('y'){date.to_string()}else{date.format("%m-%d").to_string()};}}
+    if is_date_format(format)&&n>=-1461.&&n<73416.{if !date1904&&n as i64==60{return "1900-02-29".into();}if let Some(date)=serial_date(n as i64,date1904){return if lower.contains('y'){date.to_string()}else{date.format("%m-%d").to_string()};}}
     if format=="General" {return value.into();}
     let suffix=if format.contains('%'){n*=100.;"%"}else{""};
     let decimals=format.split('.').nth(1).map(|s|s.chars().take_while(|c|*c=='0'||*c=='#').count()).unwrap_or(0).min(8);
     format!("{n:.decimals$}{suffix}")
 }
-pub fn view(bytes:&[u8],sheet:&str,highlight:&[u32])->Result<Value,String>{
+pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
+    let sheet=&method.sheet;
     let book=read(bytes)?;let path=target(&book,sheet)?;let d=doc(&book.parts[path])?;let (css,num)=styles(&book)?;
     let mut all=BTreeMap::new();let mut heights=BTreeMap::new();let mut max_col=1;let mut max_row=3;
     for row in d.descendants().filter(|n|n.has_tag_name("row")){
@@ -126,7 +149,8 @@ pub fn view(bytes:&[u8],sheet:&str,highlight:&[u32])->Result<Value,String>{
             let value=cell_value(cell,&book.strings)?;let style=cell.attribute("s").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
             let formula=cell.children().find(|n|n.has_tag_name("f")).and_then(|n|n.text()).unwrap_or("");
             let numeric=!matches!(cell.attribute("t"),Some("s"|"inlineStr"|"str"|"e"|"b"));
-            all.insert((r,c),json!({"ref":reference,"value":display(&value,num.get(style).map(String::as_str).unwrap_or("General"),numeric),"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
+            let format=if r>=4&&reference.trim_end_matches(|c:char|c.is_ascii_digit())==method.columns["date"] {"yyyy-mm-dd"}else{num.get(style).map(String::as_str).unwrap_or("General")};
+            all.insert((r,c),json!({"ref":reference,"value":display(&value,format,numeric,book.date1904),"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
         }
     }
     max_col=max_col.min(40); // shortcut: method preview displays A:AN; wider templates need pagination before onboarding.
@@ -138,7 +162,7 @@ pub fn view(bytes:&[u8],sheet:&str,highlight:&[u32])->Result<Value,String>{
     }
     let mut merges=Vec::new();
     for n in d.descendants().filter(|n|n.has_tag_name("mergeCell")){let range=attr(n,"ref");let mut bounds=range.split(':');let a=coord(bounds.next().ok_or("合并范围无效")?)?;let b=coord(bounds.next().unwrap_or(&range))?;merges.push(json!({"row":a.0,"col":a.1,"rowspan":b.0-a.0+1,"colspan":b.1-a.1+1}));}
-    let tail=max_row.saturating_sub(12).max(4);let selected=(1..=3).chain(tail..=max_row).collect::<Vec<_>>();
+    let tail=max_row.saturating_sub(12).max(4);let selected=(1..=3).chain(tail..=max_row).chain(highlight.iter().copied()).collect::<std::collections::BTreeSet<_>>();
     let rows=selected.iter().map(|r|json!({"number":r,"height":heights.get(r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(*r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
     Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"tail_start":tail,"sheet_names":book.sheets.keys().collect::<Vec<_>>()}))
 }
@@ -166,6 +190,31 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         values.insert(reference.clone(),value);
         if r==3{source_styles.insert(col,attr(cell,"s"));}
     }
+    if request.entries.len()!=outputs.len()||outputs.is_empty(){return Err("计算行数不一致".into());}
+    let (mut previous_date,mut previous_batch)=(String::new(),String::new());
+    for r in 4..=last {
+        if let Some(v)=values.get(&format!("{}{r}",method.columns["date"])).filter(|v|!v.is_empty()) {
+            let date=v.parse::<i64>().ok().and_then(|n|serial_date(n,book.date1904)).map(|d|d.to_string()).unwrap_or_else(||v.clone());if date!=previous_date {previous_batch.clear();}previous_date=date;
+        }
+        if let Some(v)=values.get(&format!("{}{r}",method.columns["batch"])).filter(|v|!v.is_empty()){previous_batch=v.clone();}
+    }
+    let mut replacements=BTreeMap::new();
+    let (_,formats)=styles(&book)?;
+    let date_col=&method.columns["date"];
+    let source_index=source_styles.get(date_col).and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
+    if !formats.get(source_index).is_some_and(|s|is_date_format(s)) {
+        let mut styles_xml=Element::parse(Cursor::new(book.parts.get("xl/styles.xml").ok_or("缺少单元格样式")?)).map_err(|_|"样式XML无效")?;
+        let xfs=styles_xml.get_mut_child("cellXfs").ok_or("缺少单元格样式")?;
+        let count=xfs.children.iter().filter_map(|n|n.as_element()).count();
+        let mut xf=xfs.children.iter().filter_map(|n|n.as_element()).nth(source_index).ok_or("日期样式无效")?.clone();
+        xf.attributes.insert("numFmtId".into(),"14".into());xf.attributes.insert("applyNumberFormat".into(),"1".into());
+        let existing=xfs.children.iter().filter_map(|n|n.as_element()).position(|n|n==&xf);
+        source_styles.insert(date_col.clone(),existing.unwrap_or(count).to_string());
+        if existing.is_none(){
+            xfs.children.push(XMLNode::Element(xf));xfs.attributes.insert("count".into(),(count+1).to_string());
+            let mut xml=Vec::new();styles_xml.write(&mut xml).map_err(|_|"生成日期样式失败")?;replacements.insert("xl/styles.xml".to_owned(),xml);
+        }
+    }
     if !values.get("B1").is_some_and(|s|s.contains('批')){return Err("表头不匹配，不能写入".into());}
     for (key,col) in &method.columns{
         if method.kind!="water_diluted"&&calc::keys(&method.kind).contains(&key.as_str())&&key!="result"&&values.get(&format!("{col}1")).is_none_or(String::is_empty){return Err("输入列缺少表头，需要核定映射".into());}
@@ -178,11 +227,27 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
     }
     let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
     let data=root.get_mut_child("sheetData").ok_or("缺少记录区")?;
+    for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
+        if row.attributes.get("r").and_then(|r|r.parse::<u32>().ok()).is_some_and(|r|r>=4&&r<=last) {
+            for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element) {
+                let reference=cell.attributes.get("r").cloned().unwrap_or_default();
+                if reference.trim_end_matches(|c:char|c.is_ascii_digit())==date_col&& !matches!(cell.attributes.get("t").map(String::as_str),Some("s"|"inlineStr"|"str"|"e"|"b"))&&values.get(&reference).is_some_and(|v|v.parse::<i64>().is_ok()) {
+                    if let Some(style)=source_styles.get(date_col){cell.attributes.insert("s".into(),style.clone());}
+                }
+            }
+        }
+    }
+    let mut expected_labels=Vec::new();
     for (index,row_no) in rows.iter().enumerate(){
-        let mut raw=request.measurements[index].clone();if method.kind=="water_diluted"{if let Some(value)=raw.remove("result"){raw.insert("raw_result".into(),value);}}
+        let entry=&request.entries[index];
+        let mut raw=entry.measurement.clone();if method.kind=="water_diluted"{if let Some(value)=raw.remove("result"){raw.insert("raw_result".into(),value);}}
         raw.extend(outputs[index].clone());
-        let date=chrono::NaiveDate::parse_from_str(&request.date,"%Y-%m-%d").map_err(|_|"日期无效")?;
-        raw.extend(Values::from([("date".into(),(date-chrono::NaiveDate::from_ymd_opt(1899,12,30).unwrap()).num_days().to_string()),("batch".into(),request.batch.clone()),("notes".into(),request.notes.clone())]));
+        let date=chrono::NaiveDate::parse_from_str(&entry.date,"%Y-%m-%d").map_err(|_|"日期无效")?;
+        let date_value=if entry.date==previous_date {String::new()}else{date_serial(date,book.date1904).to_string()};
+        let batch_value=if entry.date==previous_date&&entry.batch==previous_batch {String::new()}else{entry.batch.clone()};
+        expected_labels.push((date_value.clone(),batch_value.clone()));
+        raw.extend(Values::from([("date".into(),date_value),("batch".into(),batch_value),("notes".into(),entry.notes.clone())]));
+        previous_date=entry.date.clone();previous_batch=entry.batch.clone();
         let formulas=calc::formulas(&method.kind,&method.columns,*row_no,&method.params);
         data.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="row"&&e.attributes.get("r")==Some(&row_no.to_string())));
         let mut row=el("row");row.attributes.insert("r".into(),row_no.to_string());
@@ -197,12 +262,13 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         dimension.attributes.insert("ref".into(),format!("A1:{}{}",letter(new_col),rows.last().unwrap()));
     }
     let mut xml=Vec::new();root.write(&mut xml).map_err(|_|"生成工作表失败")?;
+    replacements.insert(path.clone(),xml);
     let mut original=ZipArchive::new(Cursor::new(bytes)).map_err(|_|"ZIP无效")?;let mut output=ZipWriter::new(Cursor::new(Vec::new()));
-    for i in 0..original.len(){let file=original.by_index(i).map_err(|_|"ZIP部件无效")?;if file.name()==path{output.start_file(&path,SimpleFileOptions::default().compression_method(file.compression())).map_err(|_|"创建工作表失败")?;output.write_all(&xml).map_err(|_|"写入工作表失败")?;}else{output.raw_copy_file(file).map_err(|_|"保留ZIP部件失败")?;}}
+    for i in 0..original.len(){let file=original.by_index(i).map_err(|_|"ZIP部件无效")?;if let Some(xml)=replacements.get(file.name()){output.start_file(file.name(),SimpleFileOptions::default().compression_method(file.compression())).map_err(|_|"创建工作表失败")?;output.write_all(xml).map_err(|_|"写入工作表失败")?;}else{output.raw_copy_file(file).map_err(|_|"保留ZIP部件失败")?;}}
     let candidate=output.finish().map_err(|_|"生成工作簿失败")?.into_inner();let check=read(&candidate)?;
-    if book.parts.iter().any(|(name,bytes)|name!=&path&&check.parts.get(name)!=Some(bytes)){return Err("无关工作簿部件发生变化".into());}
+    if book.parts.iter().any(|(name,bytes)|!replacements.contains_key(name)&&check.parts.get(name)!=Some(bytes)){return Err("无关工作簿部件发生变化".into());}
     let result=doc(&check.parts[&path])?;
-    for row in &rows{let reference=format!("{}{row}",method.columns["batch"]);let cell=result.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(&reference)).ok_or("回读记录失败")?;if cell_value(cell,&check.strings)?!=request.batch{return Err("回读批号不一致".into());}}
+    for (row,(date,batch)) in rows.iter().zip(expected_labels){for (key,expected) in [("date",date),("batch",batch)]{let reference=format!("{}{row}",method.columns[key]);let cell=result.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(&reference)).ok_or("回读记录失败")?;if cell_value(cell,&check.strings)?!=expected{return Err("回读日期或批号不一致".into());}}}
     Ok((candidate,rows))
 }
 #[cfg(windows)]
@@ -214,3 +280,25 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{
 }
 #[cfg(not(windows))]
 pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::rename(source,target)}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn excel_date_systems_and_early_1900() {
+        for date in ["1900-01-01","1900-02-28","1900-03-01","2026-10-09","2100-12-31"] {
+            let d=chrono::NaiveDate::parse_from_str(date,"%Y-%m-%d").unwrap();
+            for system in [false,true] {assert_eq!(serial_date(date_serial(d,system),system),Some(d));}
+        }
+        assert_eq!(display("46304","yyyy-mm-dd",true,false),"2026-10-09");
+        assert_eq!(display("44842","yyyy-mm-dd",true,true),"2026-10-09");
+        assert_eq!(display("60","yyyy-mm-dd",true,false),"1900-02-29");
+        assert_eq!(display("46304","General",true,false),"46304");
+        assert_eq!(display("","yyyy-mm-dd",true,false),"");
+        assert_eq!(serial_date(i64::MAX,false),None);
+        assert_eq!(serial_date(i64::MIN,true),None);
+        assert!(!is_date_format("0.00\"mg/d\""));
+        assert!(!is_date_format("[Magenta]0.00"));
+        assert!(is_date_format("[$-409]m/d/yyyy"));
+    }
+}

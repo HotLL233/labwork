@@ -1,0 +1,16 @@
+const assert=require('node:assert/strict');
+const grid=require('../web/grid.js');
+const keys=['date','batch','mass','notes'];
+const rows=[{date:'2026-10-09',batch:'D006-009',mass:'0.1'},{date:'2026-10-10',batch:'D006-010',mass:'0.2'},{},{},{}];
+const selection={r0:0,r1:1,c0:0,c1:2};
+const filled=grid.fill(rows,keys,selection,4,'series');
+assert.equal(filled[4].date,'2026-10-13');assert.equal(filled[4].batch,'D006-013');assert.equal(filled[4].mass,'0.5');assert.equal(rows[4].batch,undefined);
+assert.equal(grid.fill(rows,keys,{r0:0,r1:0,c0:0,c1:2},4,'copy')[4].batch,'D006-009');
+assert.equal(grid.fill(rows,keys,{r0:0,r1:0,c0:0,c1:2},2,'series')[2].batch,'D006-011');
+const pasted=grid.paste([],keys,0,0,'2026/10/9\tA-01\t1\n\t\t2\n2026-10-10\tA-02\t3',()=>({}));
+const entries=grid.entries(pasted,[{key:'mass'}]);assert.equal(entries[1].batch,'A-01');assert.equal(entries[1].date,'2026-10-09');assert.equal(entries[2].measurement.mass,'3');
+assert.throws(()=>grid.entries([{date:'2026-10-10',batch:''}],[{key:'mass'}]));
+assert.throws(()=>grid.paste([],keys,199,0,'1\n2',()=>({})));
+assert.equal(grid.date('46304'),'2026-10-09');
+assert.equal(grid.series(['2026-02-28'],1,'date'),'2026-03-01');
+console.log('Grid: paste, inherited labels, range copy, date/batch/decimal series and 200-row boundary passed');
