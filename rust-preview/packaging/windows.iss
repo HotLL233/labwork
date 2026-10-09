@@ -120,7 +120,7 @@ begin
       if not SaveStringToFile(DataPath + '\.labwork-rust-preview', 'isolated Rust preview {#Version}', False) then
         RaiseException('无法初始化独立数据目录。');
     Config := '{"port":' + IntToStr(StrToInt(Trim(SettingsPage.Values[0]))) + ',"data_dir":' + JsonString(DataPath) + '}';
-    if not SaveStringToUTF8File(ExpandConstant('{app}\labwork.json'), Config, False) then
+    if not SaveStringToFile(ExpandConstant('{app}\labwork.json'), UTF8Encode(Config), False) then
       RaiseException('无法保存平台配置。');
   end;
 end;
