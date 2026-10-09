@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import re
+import secrets
 import socket
 import subprocess
 import tempfile
@@ -36,6 +37,11 @@ def request(path, body=None, token='', origin=None):
 def main():
     sources = {name: (SOURCE / f'{name}.xlsx').read_bytes() for name in ('D006', 'Q')}
     fingerprints = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
+    large_workbook = io.BytesIO(sources['D006'])
+    with zipfile.ZipFile(large_workbook, 'a') as archive:
+        archive.writestr('docProps/import-test-padding.xml', '<padding>' + secrets.token_hex(1024 * 1024) + '</padding>', compress_type=zipfile.ZIP_STORED)
+    sources['D006'] = large_workbook.getvalue()
+    assert 1024 * 1024 < len(sources['D006']) < 20 * 1024 * 1024
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', PORT))
     with tempfile.TemporaryDirectory(prefix='labwork-import-') as folder:
@@ -125,7 +131,7 @@ def main():
                 assert process.returncode == 0, process.returncode
     for name, fingerprint in fingerprints.items():
         assert hashlib.sha256((SOURCE / f'{name}.xlsx').read_bytes()).hexdigest() == fingerprint
-    print(json.dumps({'bind_D006_Q': True, 'catalog_and_sheet_available': True, 'no_overwrite': True, 'concurrent_first_bind': True, 'invalid_and_wrong_project_rejected': True, 'size_and_zip_bomb_rejected': True, 'macro_template_traversal_rejected': True, 'token_origin_guard': True, 'originals_unchanged': True, 'temporary_files_cleaned': True}, indent=2))
+    print(json.dumps({'bind_D006_Q': True, 'valid_body_above_global_1MiB': True, 'large_workbook_bytes': len(sources['D006']), 'catalog_and_sheet_available': True, 'no_overwrite': True, 'concurrent_first_bind': True, 'invalid_and_wrong_project_rejected': True, 'size_and_zip_bomb_rejected': True, 'macro_template_traversal_rejected': True, 'token_origin_guard': True, 'originals_unchanged': True, 'temporary_files_cleaned': True}, indent=2))
 
 
 if __name__ == '__main__':

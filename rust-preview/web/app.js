@@ -87,8 +87,8 @@ async function selectMethod(key){
 async function selectProject(code){
   if(busy)return;$('workbook-file').value='';project=catalog.find(p=>p.code===code);document.querySelectorAll('#projects button').forEach(b=>b.classList.toggle('active',b.dataset.code===code));
   $('methods').innerHTML=project.methods.map(m=>`<button data-key="${m.key}">${escape(m.name)}</button>`).join('');$('methods').querySelectorAll('button').forEach(b=>{b.disabled=!project.available;b.onclick=()=>selectMethod(b.dataset.key);});
-  workbookStatus();const supported=project.available&&project.methods.length;['calculate','parallel','add-batch','sample','remove-row','fill-down','fill-end'].forEach(id=>$(id).disabled=!supported);
-  if(supported)await selectMethod(project.methods[0].key);else{method=null;baseView=null;selection=null;invalidate();$('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('title').textContent=project.name;$('breadcrumb').textContent=`检测项目 / ${code}`;message(project.methods.length?'请先导入此项目的工作簿副本，再选择检测方法。':'此项目的方法尚未迁移，当前覆盖 D006 / Q。');}
+  workbookStatus();const supported=project.available&&project.methods.length;['calculate','parallel','add-batch','sample','remove-row','fill-down','fill-end','undo','reset'].forEach(id=>$(id).disabled=!supported);
+  if(supported)await selectMethod(project.methods[0].key);else{method=null;baseView=null;rows=[];undo=[];anchor=null;selection=null;invalidate();$('row-count').textContent='0 / 200 行';$('selection-label').textContent='请先导入工作簿并选择方法';$('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('title').textContent=project.name;$('breadcrumb').textContent=`检测项目 / ${code}`;message(project.methods.length?'请先导入此项目的工作簿副本，再选择检测方法。':'此项目的方法尚未迁移，当前覆盖 D006 / Q。');}
 }
 $('calculate').onclick=async()=>{
   if(busy||!method)return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在计算全部批号…';const version=inputVersion;
@@ -101,7 +101,7 @@ $('remove-row').onclick=()=>{if(!method||busy||!selection)return;if(rows.length-
 $('fill-down').onclick=()=>fill(Number($('fill-to').value)-1);$('fill-end').onclick=()=>fill(rows.length-1);
 $('sample').onclick=()=>{if(!method||busy)return;changed(rows.map((r,i)=>({...r,date:r.date||today(),batch:r.batch||`PREVIEW-ONLY-${String(i+1).padStart(3,'0')}`,...Object.fromEntries(method.fields.map(f=>[f.key,f.sample]))})));};
 $('reset').onclick=()=>{if(busy||!method)return;selection=null;anchor=null;changed([{date:today(),batch:'',notes:''}]);};
-$('undo').onclick=()=>{if(busy||!undo.length)return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();};
+$('undo').onclick=()=>{if(busy||!method||!undo.length)return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();};
 $('mobile-preview').onclick=()=>{$('sheet-scroll').scrollIntoView({behavior:'smooth',block:'center'});};
 $('history-button').onclick=async()=>{try{const data=await api('/api/history');$('history').hidden=!$('history').hidden;$('history').innerHTML=`<h3>预览与写入历史</h3><table><thead><tr><th>项目 / 方法</th><th>批号</th><th>结果</th><th>目标行</th><th>状态</th></tr></thead><tbody>${data.map(r=>`<tr><td>${escape(r.request.project)} / ${escape(r.request.method)}</td><td>${escape([...new Set(r.request.entries?.map(e=>e.batch)||[r.request.batch])].join(' / '))}</td><td>${r.outputs.map(o=>escape(o.display)+' '+escape(o.unit)).join(' / ')}</td><td>${r.rows[0]}–${r.rows.at(-1)}</td><td>${r.state==='done'?'已写入':r.state==='writing'?'写入待恢复':'仅预览'}</td></tr>`).join('')}</tbody></table>`;}catch(e){message(e.message);}};
 function workbookStatus(){
