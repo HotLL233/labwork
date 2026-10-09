@@ -54,7 +54,9 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                 time.sleep(.1)
         token=re.search(r'name="labwork-token" content="([a-f0-9]+)"',page)[1]
         fails(403,'/api/catalog',headers={'Host':'evil.example'})
-        assert len(request('/api/catalog')['projects'])==12
+        active=request('/api/catalog')
+        assert len(active['projects'])==2
+        working=home/'months'/active['active_month']/'workbooks'
         total=0
         last_payload=None
         for project in catalog:
@@ -67,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                 raw={f['key']:f['sample'] for f in method['fields']}
                 payload={'project':project['code'],'method':method['key'],'date':'2026-10-09','batch':f'RUST-TEST-{total}','notes':'isolated smoke','measurements':[raw,dict(raw)]}
                 _,expected=calculate(method['kind'],raw,method['params'])
-                before=members(home/'workbooks'/f"{project['code']}.xlsx")
+                before=members(working/f"{project['code']}.xlsx")
                 result=request('/api/preview',payload)
                 assert result['outputs'][0]['display']==expected['display'],(method['key'],result['outputs'],expected)
                 if 'result' in expected:assert Decimal(result['outputs'][0]['result'])==Decimal(expected['result'])
@@ -88,10 +90,10 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                     for r,o in zip(result['rows'],result['outputs']):
                         v=after_xml.find(f".//s:c[@r='{method['columns']['result']}{r}']/s:v",ns)
                         assert v is not None and Decimal(v.text)==Decimal(o['result'])
-                assert before==members(home/'workbooks'/f"{project['code']}.xlsx"),'Preview must not write working file'
+                assert before==members(working/f"{project['code']}.xlsx"),'Preview must not write working file'
                 assert request(f"/api/commit/{result['id']}",{})['state']=='done'
                 assert request(f"/api/commit/{result['id']}",{})['state']=='done'
-                assert members(home/'workbooks'/f"{project['code']}.xlsx")==after
+                assert members(working/f"{project['code']}.xlsx")==after
                 total+=1;last_payload=payload
         assert total==14
         fails(403,'/api/preview',last_payload,{'X-Labwork-Token':'wrong'})
@@ -141,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         _,value=sheet_cells(again)
         assert [value('A'+str(r)) for r in again['rows']]==['','']
         assert [value('B'+str(r)) for r in again['rows']]==['','']
-        assert members(home/'previews'/f"{again['id']}.xlsx")['xl/styles.xml']==members(home/'workbooks'/'D006.xlsx')['xl/styles.xml'],'Date styles must be reused'
+        assert members(home/'previews'/f"{again['id']}.xlsx")['xl/styles.xml']==members(working/'D006.xlsx')['xl/styles.xml'],'Date styles must be reused'
         assert request('/api/sheet/D006/water')['next_row']==again['rows'][0]
         # A full 200-row candidate must show every pending result, not just the last 13.
         many=request('/api/preview',{'project':'D006','method':'water','entries':[{'date':'2026-10-12','batch':f'BULK-{i//2:03d}','measurement':raw} for i in range(200)]})
@@ -149,15 +151,15 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         fails(400,'/api/preview',dict(payload,entries=payload['entries']*41))
         invalid=dict(payload['entries'][0],date='2026-02-30')
         fails(400,'/api/preview',dict(payload,entries=[invalid]))
-        before_invalid=members(home/'workbooks'/'D006.xlsx')
+        before_invalid=members(working/'D006.xlsx')
         invalid=dict(payload['entries'][0],measurement={})
         with closing(sqlite3.connect(home/'preview.sqlite3')) as db:count_before=db.execute('SELECT count(*) FROM previews').fetchone()[0]
         fails(400,'/api/preview',dict(payload,entries=[payload['entries'][1],invalid]))
         with closing(sqlite3.connect(home/'preview.sqlite3')) as db:assert count_before==db.execute('SELECT count(*) FROM previews').fetchone()[0]
-        assert before_invalid==members(home/'workbooks'/'D006.xlsx')
+        assert before_invalid==members(working/'D006.xlsx')
         fails(400,'/api/preview',dict(payload,measurements=[raw]))
         assert len(request('/api/history'))>=18
-        qbook=home/'workbooks'/'Q.xlsx'
+        qbook=working/'Q.xlsx'
         parts=members(qbook)
         wb=ET.fromstring(parts['xl/workbook.xml'])
         props=wb.find('s:workbookPr',ns)

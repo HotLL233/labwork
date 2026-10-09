@@ -6,7 +6,7 @@ use xmltree::{Element, XMLNode};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const MAIN:&str="http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-struct Book {parts:BTreeMap<String,Vec<u8>>,strings:Vec<String>,sheets:BTreeMap<String,String>,date1904:bool}
+struct Book {parts:BTreeMap<String,Vec<u8>>,strings:Vec<String>,sheets:BTreeMap<String,String>,order:Vec<String>,date1904:bool}
 fn text(n:Node<'_, '_>)->String {n.descendants().filter(|n|n.is_element()&&n.tag_name().name()=="t").filter_map(|n|n.text()).collect()}
 fn attr(n:Node<'_, '_>,key:&str)->String {n.attribute(key).unwrap_or("").to_owned()}
 fn doc(bytes:&[u8])->Result<Document<'_>,String>{Document::parse(std::str::from_utf8(bytes).map_err(|_|"XML编码不支持")?).map_err(|_|"工作簿XML无效".into())}
@@ -28,16 +28,73 @@ fn read(bytes:&[u8])->Result<Book,String>{
     let relations=doc(parts.get("xl/_rels/workbook.xml.rels").ok_or("缺少工作簿关系")?)?;
     let rels=relations.descendants().filter(|n|n.has_tag_name("Relationship")&&n.attribute("TargetMode")!=Some("External")).map(|n|(attr(n,"Id"),attr(n,"Target"))).collect::<BTreeMap<_,_>>();
     let book=doc(parts.get("xl/workbook.xml").ok_or("缺少工作簿结构")?)?;
-    let mut sheets=BTreeMap::new();
+    let mut sheets=BTreeMap::new();let mut order=Vec::new();
     for n in book.descendants().filter(|n|n.has_tag_name("sheet")){
         let id=n.attribute(("http://schemas.openxmlformats.org/officeDocument/2006/relationships","id")).ok_or("工作表关系无效")?;
         let target=rels.get(id).ok_or("工作表关系不存在")?;
         let target=if target.starts_with('/') {target.trim_start_matches('/').to_owned()}else{format!("xl/{target}")};
         if !target.starts_with("xl/worksheets/")||!parts.contains_key(&target){return Err("工作表链接无效".into());}
-        sheets.insert(attr(n,"name"),target);
+        let name=attr(n,"name");if sheets.insert(name.clone(),target).is_some(){return Err("工作表名称重复".into());}order.push(name);
     }
     let date1904=book.descendants().any(|n|n.has_tag_name("workbookPr")&&matches!(n.attribute("date1904"),Some("1"|"true")));
-    Ok(Book{parts,strings,sheets,date1904})
+    Ok(Book{parts,strings,sheets,order,date1904})
+}
+pub fn sheet_names(bytes:&[u8])->Result<Vec<String>,String>{Ok(read(bytes)?.order)}
+#[derive(Clone,serde::Serialize,serde::Deserialize)]
+pub struct MonthRule {
+    pub sheet:String,
+    #[serde(rename="start_row")]
+    pub data_start_row:u32,
+    #[serde(rename="columns")]
+    pub clear_columns:Vec<String>,
+}
+pub fn discover(bytes:&[u8])->Result<Vec<MonthRule>,String>{
+    let book=read(bytes)?;let mut rules=Vec::new();
+    for sheet in &book.order {
+        if sheet.trim()=="目录"{rules.push(MonthRule{sheet:sheet.clone(),data_start_row:3,clear_columns:Vec::new()});continue;}
+        let d=doc(&book.parts[target(&book,sheet)?])?;let mut headers=BTreeMap::new();
+        for cell in d.descendants().filter(|n|n.has_tag_name("c")) {
+            let (row,col)=coord(&attr(cell,"r"))?;
+            if row==1 {headers.insert(col,cell_value(cell,&book.strings)?);}
+        }
+        let Some(batch)=headers.iter().find(|(_,v)|v.contains('批')).map(|(c,_)|*c)else{rules.push(MonthRule{sheet:sheet.clone(),data_start_row:3,clear_columns:Vec::new()});continue};
+        let parameter_end=headers.iter().filter(|(c,_)|**c>batch).find(|(_,v)|["试剂","规格","浓度","系数","mol","M="].iter().any(|word|v.contains(word))).map(|(c,_)|c-1).unwrap_or_else(||headers.keys().copied().max().unwrap_or(batch));
+        let end=headers.iter().find(|(c,v)|**c>batch&&v.contains("备注")).map(|(c,_)|*c).unwrap_or(parameter_end).min(parameter_end);
+        let example=d.descendants().filter(|n|n.has_tag_name("c")&&n.attribute("r")==Some(format!("{}3",letter(batch)).as_str())).filter_map(|n|cell_value(n,&book.strings).ok()).any(|v|matches!(v.trim(),"例"|"示例"|"举例"));
+        // These are suggestions only: callers must require review before clearing an unfamiliar template.
+        rules.push(MonthRule{sheet:sheet.clone(),data_start_row:if example{4}else{3},clear_columns:(1..=end.min(40)).map(letter).collect()});
+    }
+    Ok(rules)
+}
+pub fn blank_month(bytes:&[u8],rules:&[MonthRule])->Result<Vec<u8>,String>{
+    if rules.is_empty(){return Err("请先确认至少一个工作表的清空范围".into());}
+    let book=read(bytes)?;let mut replacements=BTreeMap::new();let mut seen=HashSet::new();
+    for rule in rules {
+        let path=target(&book,&rule.sheet)?.clone();
+        if !seen.insert(path.clone()){return Err("同一工作表不能重复设置清空范围".into());}
+        if !(3..=1048576).contains(&rule.data_start_row){return Err("清空范围须从第3行或之后开始".into());}
+        if rule.clear_columns.is_empty(){continue;}
+        if rule.sheet.trim()=="目录" {return Err("目录仅用于浏览，不能清空".into());}
+        let columns=rule.clear_columns.iter().map(|c|coord(&format!("{c}1")).and_then(|(r,col)|if r==1&&letter(col)==*c{Ok(col)}else{Err("清空列必须使用A、B等大写列名".into())})).collect::<Result<HashSet<_>,String>>()?;
+        let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
+        let data=root.get_mut_child("sheetData").ok_or("缺少工作表数据区")?;
+        for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
+            for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element).filter(|e|e.name=="c") {
+                let (r,c)=coord(cell.attributes.get("r").ok_or("缺少单元格坐标")?)?;
+                if cell.get_child("f").is_some() {
+                    cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"));
+                } else if r>=rule.data_start_row&&columns.contains(&c) {
+                    cell.attributes.remove("t");cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="is"));
+                }
+            }
+        }
+        let mut xml=Vec::new();root.write(&mut xml).map_err(|_|"生成月度模板失败")?;replacements.insert(path,xml);
+    }
+    let mut original=ZipArchive::new(Cursor::new(bytes)).map_err(|_|"ZIP无效")?;let mut output=ZipWriter::new(Cursor::new(Vec::new()));
+    for i in 0..original.len(){let file=original.by_index(i).map_err(|_|"ZIP部件无效")?;if let Some(xml)=replacements.get(file.name()){output.start_file(file.name(),SimpleFileOptions::default().compression_method(file.compression())).map_err(|_|"创建月模板失败")?;output.write_all(xml).map_err(|_|"写入月模板失败")?;}else{output.raw_copy_file(file).map_err(|_|"保留工作簿部件失败")?;}}
+    let candidate=output.finish().map_err(|_|"生成月模板失败")?.into_inner();let check=read(&candidate)?;
+    if book.parts.iter().any(|(name,bytes)|!replacements.contains_key(name)&&check.parts.get(name)!=Some(bytes)){return Err("非目标工作簿部件发生变化".into());}
+    Ok(candidate)
 }
 fn target<'a>(book:&'a Book,name:&str)->Result<&'a String,String>{
     let matches=book.sheets.iter().filter(|(s,_)|s.trim()==name.trim()).collect::<Vec<_>>();
@@ -56,6 +113,10 @@ fn coord(s:&str)->Result<(u32,u32),String>{
     if col==0||col>16384||row==0||row>1048576{return Err("坐标超出Excel范围".into());}Ok((row,col))
 }
 fn letter(mut col:u32)->String {let mut out=String::new();while col>0{col-=1;out.insert(0,(b'A'+(col%26)as u8)as char);col/=26;}out}
+fn merge_bounds(range:&str)->Result<((u32,u32),(u32,u32)),String>{
+    let mut ends=range.split(':');let a=coord(ends.next().ok_or("合并范围无效")?)?;let b=coord(ends.next().unwrap_or(range))?;
+    if ends.next().is_some()||b.0<a.0||b.1<a.1{return Err("合并范围顺序无效".into());}Ok((a,b))
+}
 fn colours(book:&Book)->Vec<String>{
     let mut out=vec!["FFFFFF","000000","E7E6E6","44546A","4472C4","ED7D31","A5A5A5","FFC000","5B9BD5","70AD47","0563C1","954F72"].into_iter().map(str::to_owned).collect::<Vec<_>>();
     if let Some(xml)=book.parts.get("xl/theme/theme1.xml"){if let Ok(d)=doc(xml){if let Some(scheme)=d.descendants().find(|n|n.is_element()&&n.tag_name().name()=="clrScheme"){
@@ -160,7 +221,7 @@ fn historical_labels(d:&Document<'_>,book:&Book,method:&Method)->Result<(HashSet
     for cell in d.descendants().filter(|n|n.has_tag_name("c")){cells.insert(attr(cell,"r"),cell);}
     let mut merged=Vec::new();
     for cell in d.descendants().filter(|n|n.has_tag_name("mergeCell")) {
-        let range=attr(cell,"ref");let mut ends=range.split(':');let a=coord(ends.next().ok_or("合并范围无效")?)?;let b=coord(ends.next().unwrap_or(&range))?;merged.push((a,b));
+        merged.push(merge_bounds(&attr(cell,"ref"))?);
     }
     for row in 4..=last_data_row(book,method)? {
         let references=[format!("{}{row}",method.columns["date"]),format!("{}{row}",method.columns["batch"])];
@@ -176,9 +237,16 @@ fn historical_labels(d:&Document<'_>,book:&Book,method:&Method)->Result<(HashSet
     Ok((hidden,context,groups))
 }
 pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
-    let sheet=&method.sheet;
+    view_inner(bytes,&method.sheet,Some(method),highlight,None)
+}
+pub fn raw_view(bytes:&[u8],sheet:&str,start_row:u32)->Result<Value,String>{
+    if start_row==0||start_row>1048576{return Err("分页起始行超出范围".into());}
+    view_inner(bytes,sheet,None,&[],Some(start_row))
+}
+fn view_inner(bytes:&[u8],sheet:&str,method:Option<&Method>,highlight:&[u32],page:Option<u32>)->Result<Value,String>{
     let book=read(bytes)?;let path=target(&book,sheet)?;let d=doc(&book.parts[path])?;let (css,num)=styles(&book)?;
-    let (hidden,context,_)=historical_labels(&d,&book,method)?;
+    let (hidden,context)=if let Some(method)=method{let (hidden,context,_)=historical_labels(&d,&book,method)?;(hidden,context)}else{(HashSet::new(),BTreeMap::new())};
+    let date_columns=d.descendants().filter(|n|n.has_tag_name("c")).filter_map(|n|coord(&attr(n,"r")).ok().filter(|(r,_)|*r<=3).and_then(|(_,c)|cell_value(n,&book.strings).ok().filter(|v|v.trim()=="日期").map(|_|c))).collect::<HashSet<_>>();
     let mut all=BTreeMap::new();let mut heights=BTreeMap::new();let mut max_col=1;let mut max_row=3;
     for row in d.descendants().filter(|n|n.has_tag_name("row")){
         let r=attr(row,"r").parse::<u32>().map_err(|_|"行号无效")?;
@@ -188,25 +256,27 @@ pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
             let value=cell_value(cell,&book.strings)?;let style=cell.attribute("s").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
             let formula=cell.children().find(|n|n.has_tag_name("f")).and_then(|n|n.text()).unwrap_or("");
             let numeric=!matches!(cell.attribute("t"),Some("s"|"inlineStr"|"str"|"e"|"b"));
-            let is_date=r>=4&&reference.trim_end_matches(|c:char|c.is_ascii_digit())==method.columns["date"];
+            let is_date=r>=4&&method.map(|m|reference.trim_end_matches(|c:char|c.is_ascii_digit())==m.columns["date"]).unwrap_or_else(||date_columns.contains(&c));
             let shown=if is_date {cell_date(&value,book.date1904).map(|d|d.to_string()).unwrap_or_else(||value.clone())}else{display(&value,num.get(style).map(String::as_str).unwrap_or("General"),numeric,book.date1904)};
             all.insert((r,c),json!({"ref":reference,"value":if hidden.contains(&reference){String::new()}else{shown},"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
         }
     }
-    max_col=max_col.min(40); // shortcut: method preview displays A:AN; wider templates need pagination before onboarding.
+    let full_columns=max_col;
+    max_col=max_col.min(if page.is_some(){200}else{40}); // shortcut: wider raw sheets need column pagination before onboarding.
     let mut widths=vec![90f32;max_col as usize];
     for n in d.descendants().filter(|n|n.has_tag_name("col")){
-        let start=attr(n,"min").parse::<u32>().unwrap_or(1);let end=attr(n,"max").parse::<u32>().unwrap_or(start).min(max_col);
+        let start=attr(n,"min").parse::<u32>().map_err(|_|"列范围无效")?;let full_end=attr(n,"max").parse::<u32>().map_err(|_|"列范围无效")?;
+        if start==0||full_end<start||full_end>16384{return Err("列范围超出Excel范围或顺序无效".into());}let end=full_end.min(max_col);
         let width=n.attribute("width").and_then(|s|s.parse::<f32>().ok()).unwrap_or(12.)*7.+5.;
         for c in start..=end{widths[(c-1)as usize]=width.clamp(35.,650.);}
     }
     let mut merges=Vec::new();
-    for n in d.descendants().filter(|n|n.has_tag_name("mergeCell")){let range=attr(n,"ref");let mut bounds=range.split(':');let a=coord(bounds.next().ok_or("合并范围无效")?)?;let b=coord(bounds.next().unwrap_or(&range))?;merges.push(json!({"row":a.0,"col":a.1,"rowspan":b.0-a.0+1,"colspan":b.1-a.1+1}));}
-    let tail=max_row.saturating_sub(12).max(4);let mut selected=(1..=3).chain(tail..=max_row).chain(highlight.iter().copied()).collect::<std::collections::BTreeSet<_>>();
+    for n in d.descendants().filter(|n|n.has_tag_name("mergeCell")){let (a,b)=merge_bounds(&attr(n,"ref"))?;merges.push(json!({"row":a.0,"col":a.1,"rowspan":b.0-a.0+1,"colspan":b.1-a.1+1}));}
+    let tail=max_row.saturating_sub(12).max(4);let mut selected=if let Some(start)=page{(start..=max_row.min(start+199)).collect::<std::collections::BTreeSet<_>>()}else{(1..=3).chain(tail..=max_row).chain(highlight.iter().copied()).collect::<std::collections::BTreeSet<_>>()};
     // Keep group headers visible when the tail starts halfway through a day's results.
     for row in selected.clone(){if let Some(anchors)=context.get(&row){selected.extend(anchors);}}
     let rows=selected.iter().map(|r|json!({"number":r,"height":heights.get(r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(*r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
-    Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"tail_start":tail,"sheet_names":book.sheets.keys().collect::<Vec<_>>()}))
+    Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"tail_start":tail,"sheet_names":book.order,"start_row":page.unwrap_or(1),"next_row":page.filter(|start|start+199<max_row).map(|start|start+200),"truncated":page.is_some_and(|start|start>1||start+199<max_row)||full_columns>max_col,"columns_truncated":full_columns>max_col}))
 }
 fn el(name:&str)->Element{let mut e=Element::new(name);e.namespace=Some(MAIN.into());e}
 fn value_cell(reference:String,style:Option<String>,value:String,text:bool,formula:Option<&String>)->Element{
@@ -258,8 +328,8 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
     let rows=(last+1..last+1+outputs.len()as u32).collect::<Vec<_>>();if rows.iter().any(|r|*r>1048576){return Err("记录区已满".into());}
     for ref_value in values.keys(){let (r,_)=coord(ref_value)?;if rows.contains(&r)&&!values[ref_value].is_empty(){return Err("待写入行已占用".into());}}
     for merged in d.descendants().filter(|n|n.has_tag_name("mergeCell")){
-        let range=attr(merged,"ref");let ends=range.split(':').map(coord).collect::<Result<Vec<_>,_>>()?;
-        if rows.iter().any(|r|*r>=ends[0].0&&*r<=ends.last().unwrap().0){return Err("待写入行涉及合并单元格，请核定映射".into());}
+        let (a,b)=merge_bounds(&attr(merged,"ref"))?;
+        if rows.iter().any(|r|*r>=a.0&&*r<=b.0){return Err("待写入行涉及合并单元格，请核定映射".into());}
     }
     let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
     let data=root.get_mut_child("sheetData").ok_or("缺少记录区")?;
@@ -330,14 +400,48 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires LABWORK_INVENTORY pointing to the read-only local workbook inventory"]
+    fn original_workbooks_discovery_and_month_templates() {
+        let inventory:Value=serde_json::from_slice(&std::fs::read(std::env::var("LABWORK_INVENTORY").expect("inventory path")).unwrap()).unwrap();
+        let mut sheet_count=0;
+        for item in inventory.as_array().unwrap() {
+            let path=item["Path"].as_str().unwrap();let original=std::fs::read(path).unwrap();
+            let names=sheet_names(&original).unwrap();assert_eq!(names.len(),item["SheetCount"].as_u64().unwrap()as usize);
+            for name in &names {
+                let view=raw_view(&original,name,1).unwrap();assert!(view["rows"].as_array().unwrap().len()<=200);
+                assert_eq!(&view["name"],name);
+                sheet_count+=1;
+            }
+            let rules=discover(&original).unwrap();assert!(!rules.is_empty());
+            let candidate=blank_month(&original,&rules).unwrap();let source=read(&original).unwrap();let blank=read(&candidate).unwrap();
+            for rule in &rules {
+                let path=target(&source,&rule.sheet).unwrap();let d=doc(&source.parts[path]).unwrap();let output=doc(&blank.parts[path]).unwrap();
+                let cells=output.descendants().filter(|n|n.has_tag_name("c")).map(|n|(attr(n,"r"),n)).collect::<BTreeMap<_,_>>();
+                for cell in d.descendants().filter(|n|n.has_tag_name("c")) {
+                    let reference=attr(cell,"r");let (row,col)=coord(&reference).unwrap();let actual=cells[&reference];
+                    assert_eq!(cell.attribute("s"),actual.attribute("s"));
+                    if let Some(formula)=cell.children().find(|n|n.has_tag_name("f")).filter(|_|!rule.clear_columns.is_empty()) {
+                        let actual_formula=actual.children().find(|n|n.has_tag_name("f")).unwrap();assert_eq!(formula.text(),actual_formula.text());assert_eq!(formula.attributes().map(|a|(a.name(),a.value())).collect::<BTreeMap<_,_>>(),actual_formula.attributes().map(|a|(a.name(),a.value())).collect::<BTreeMap<_,_>>());
+                        assert!(!actual.children().any(|n|n.has_tag_name("v")));
+                    } else if row>=rule.data_start_row&&rule.clear_columns.contains(&letter(col)) {
+                        assert!(cell_value(actual,&blank.strings).unwrap().is_empty());
+                    } else {assert_eq!(cell_value(cell,&source.strings).unwrap(),cell_value(actual,&blank.strings).unwrap());}
+                }
+            }
+            assert_eq!(std::fs::read(path).unwrap(),original);
+        }
+        println!("read-only fixture verification: {} workbooks, {sheet_count} sheets",inventory.as_array().unwrap().len());
+    }
+    #[test]
     fn historical_labels_keep_raw_context_formulas_and_cross_day_batches() {
         let projects:Vec<crate::Project>=serde_json::from_str(include_str!("../catalog.json")).unwrap();
         let method=projects.iter().find(|p|p.code=="D006").unwrap().methods.iter().find(|m|m.key=="chloride").unwrap();
         let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
         let sheet=format!(r#"<worksheet xmlns="{MAIN}"><sheetData>
           <row r="1"><c r="B1" t="inlineStr"><is><t>批号</t></is></c><c r="C1" t="inlineStr"><is><t>质量</t></is></c><c r="D1" t="inlineStr"><is><t>体积</t></is></c></row>
+          <row r="2"><c r="F2"><v>35.45</v></c></row>
           <row r="3"><c r="A3" s="0"/></row>
-          <row r="4"><c r="A4"><v>46303</v></c><c r="B4" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C4"><v>1</v></c></row>
+          <row r="4"><c r="A4"><v>46303</v></c><c r="B4" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C4"><v>1</v></c><c r="F4"><v>0.1032</v></c></row>
           <row r="5"><c r="A5"><v>20261008</v></c><c r="B5" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C5"><v>2</v></c></row>
           <row r="6"><c r="A6"><v>46304</v></c><c r="B6" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C6"><v>3</v></c></row>
           <row r="7"><c r="B7" t="inlineStr"><is><t>LOT-1</t></is></c></row>
@@ -347,10 +451,11 @@ mod tests {
           <row r="24"><c r="C24"><v>4</v></c><c r="E24"><f>C24*2</f><v>8</v></c></row>
         </sheetData><mergeCells count="1"><mergeCell ref="A10:A11"/></mergeCells></worksheet>"#);
         for (name,xml) in [
-            ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{}" sheetId="1" r:id="rId1"/></sheets></workbook>"#,method.sheet)),
-            ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#.into()),
+            ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="目录" sheetId="2" r:id="rId2"/><sheet name="{}" sheetId="1" r:id="rId1"/></sheets></workbook>"#,method.sheet)),
+            ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.into()),
             ("xl/styles.xml",format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="1"><xf numFmtId="0"/></cellXfs></styleSheet>"#)),
             ("xl/worksheets/sheet1.xml",sheet),
+            ("xl/worksheets/sheet2.xml",format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>目录</t></is></c></row></sheetData></worksheet>"#)),
         ] {zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(xml.as_bytes()).unwrap();}
         let source=zip.finish().unwrap().into_inner();
         let view=view(&source,method,&[5,7,8,9,10]).unwrap();
@@ -373,6 +478,32 @@ mod tests {
         assert!(d.descendants().any(|n|n.has_tag_name("mergeCell")&&n.attribute("ref")==Some("A10:A11")));
         let source_book=read(&source).unwrap();let source_doc=doc(&source_book.parts["xl/worksheets/sheet1.xml"]).unwrap();
         assert_eq!(cell_value(source_doc.descendants().find(|n|n.attribute("r")==Some("A5")).unwrap(),&source_book.strings).unwrap(),"20261008");
+        assert_eq!(sheet_names(&source).unwrap(),vec!["目录".to_owned(),method.sheet.clone()]);
+        let raw=raw_view(&source,&method.sheet,1).unwrap();assert_eq!(raw["rows"].as_array().unwrap().len(),24);
+        assert!(!raw["truncated"].as_bool().unwrap());
+        let page=raw_view(&source,&method.sheet,20).unwrap();assert_eq!(page["rows"][0]["number"],20);assert_eq!(page["truncated"],true);
+        assert!(raw_view(&source,&method.sheet,0).is_err());
+        assert_eq!(discover(&source).unwrap().len(),2);
+        let rule=MonthRule{sheet:method.sheet.clone(),data_start_row:3,clear_columns:vec!["A".into(),"B".into(),"C".into(),"D".into(),"E".into()]};
+        let blank=blank_month(&source,&[rule.clone()]).unwrap();let blank_book=read(&blank).unwrap();let blank_doc=doc(&blank_book.parts["xl/worksheets/sheet1.xml"]).unwrap();
+        let blank_cell=|reference:&str|blank_doc.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();
+        for reference in ["A4","B4","C4","A5","C24"]{assert_eq!(cell_value(blank_cell(reference),&blank_book.strings).unwrap(),"");}
+        for (reference,value) in [("F2","35.45"),("F4","0.1032"),("B1","批号")] {assert_eq!(cell_value(blank_cell(reference),&blank_book.strings).unwrap(),value);}
+        for (reference,formula) in [("A8","A6"),("B9","B6"),("E24","C24*2")] {let c=blank_cell(reference);assert_eq!(c.children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));assert!(c.children().all(|n|!n.has_tag_name("v")));}
+        assert_eq!(blank_cell("A3").attribute("s"),Some("0"));
+        for (name,part) in &source_book.parts {if name!="xl/worksheets/sheet1.xml"{assert_eq!(blank_book.parts[name],*part);}}
+        assert!(blank_month(&source,&[]).is_err());assert!(blank_month(&source,&[rule.clone(),rule.clone()]).is_err());
+        assert!(blank_month(&source,&[MonthRule{sheet:"目录".into(),..rule.clone()}]).is_err());
+        assert!(blank_month(&source,&[MonthRule{data_start_row:2,..rule}]).is_err());
+        for invalid in ["<cols><col min=\"0\" max=\"1\"/></cols>","<cols><col min=\"5\" max=\"1\"/></cols>","<cols><col min=\"1\" max=\"16385\"/></cols>","<mergeCells><mergeCell ref=\"B8:A4\"/></mergeCells>","<mergeCells><mergeCell ref=\"A1:B2:C3\"/></mergeCells>"] {
+            let mut malformed=ZipWriter::new(Cursor::new(Vec::new()));
+            for (name,bytes) in &source_book.parts {
+                malformed.start_file(name,SimpleFileOptions::default()).unwrap();
+                if name=="xl/worksheets/sheet1.xml" {let xml=String::from_utf8(bytes.clone()).unwrap().replace("</worksheet>",&format!("{invalid}</worksheet>"));malformed.write_all(xml.as_bytes()).unwrap();}
+                else {malformed.write_all(bytes).unwrap();}
+            }
+            assert!(raw_view(&malformed.finish().unwrap().into_inner(),&method.sheet,1).is_err(),"{invalid}");
+        }
     }
     #[test]
     fn excel_date_systems_and_early_1900() {

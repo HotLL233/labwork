@@ -61,13 +61,15 @@ def main():
                 else:
                     raise AssertionError('API did not start')
                 token = re.search(rb'name="labwork-token" content="([a-f0-9]+)"', page)[1].decode()
+                active=json.loads(request('/api/catalog')[1])
+                working=home/'months'/active['active_month']/'workbooks'
                 path = '/api/workbook/D006'
                 assert request(path, sources['D006'])[0] == 403
                 assert request(path, sources['D006'], token, 'http://127.0.0.1:18802')[0] == 403
-                assert request('/api/workbook/NOPE', sources['D006'], token)[0] == 400
-                assert request('/api/workbook/A3', sources['D006'], token)[0] == 400
+                assert request('/api/workbook/BAD%20CODE', sources['D006'], token)[0] == 400
+                assert request('/api/workbook/A3', sources['D006'], token)[0] == 200
                 assert request(path, b'not an xlsx', token)[0] == 400
-                assert request(path, sources['Q'], token)[0] == 400
+                # Any valid workbook can be bound; methods are enabled only when its layout matches.
                 assert request(path, b'0' * (20 * 1024 * 1024 + 1), token)[0] == 413
                 bomb = io.BytesIO()
                 with zipfile.ZipFile(bomb, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -80,6 +82,16 @@ def main():
                 assert request(path, too_many.getvalue(), token)[0] == 400
                 with zipfile.ZipFile(io.BytesIO(sources['D006'])) as source:
                     members = {name: source.read(name) for name in source.namelist()}
+                sheet_name = next(name for name in members if name.startswith('xl/worksheets/') and name.endswith('.xml'))
+                for element in ('<cols><col min="0" max="1"/></cols>', '<mergeCells><mergeCell ref="B8:A4"/></mergeCells>'):
+                    tree = ET.fromstring(members[sheet_name])
+                    tree.append(ET.fromstring(element))
+                    malformed = io.BytesIO()
+                    with zipfile.ZipFile(malformed, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                        for name, data in members.items():
+                            archive.writestr(name, ET.tostring(tree) if name == sheet_name else data)
+                    assert request(path, malformed.getvalue(), token)[0] == 400
+                    assert request('/api/catalog')[0] == 200
                 for bad_members in (
                     {**members, '../outside.xml': b'bad'},
                     {**members, 'xl/vbaProject.bin': b'macro'},
@@ -101,14 +113,14 @@ def main():
                                         row.remove(cell)
                             data = ET.tostring(root)
                         archive.writestr(name, data)
-                assert request(path, missing_header.getvalue(), token)[0] == 400
-                assert not (home / 'workbooks/D006.xlsx').exists()
+                assert request('/api/workbook/RAW_ONLY', missing_header.getvalue(), token)[0] == 200
+                assert not (working / 'D006.xlsx').exists()
                 status, body = request(path, sources['D006'], token)
                 assert status == 200, (status, body)
                 assert json.loads(body) == {'available': True, 'name': 'D006.xlsx'}
-                assert (home / 'workbooks/D006.xlsx').read_bytes() == sources['D006']
+                assert (working / 'D006.xlsx').read_bytes() == sources['D006']
                 assert request(path, sources['Q'], token)[0] == 409
-                assert (home / 'workbooks/D006.xlsx').read_bytes() == sources['D006']
+                assert (working / 'D006.xlsx').read_bytes() == sources['D006']
                 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                     results = list(pool.map(lambda _: request('/api/workbook/Q', sources['Q'], token)[0], range(2)))
                 assert sorted(results) == [200, 409], results
@@ -116,8 +128,8 @@ def main():
                 assert all(next(p for p in catalog['projects'] if p['code'] == name)['available'] for name in sources)
                 for name in sources:
                     assert request(f'/api/sheet/{name}/chloride')[0] == 200
-                assert not list((home / 'workbooks').glob('*.tmp'))
-                assert not list((home / 'workbooks').glob('.import-*'))
+                assert not list((working).glob('*.tmp'))
+                assert not list((working).glob('.import-*'))
             except BaseException:
                 log.flush()
                 print((Path(folder) / 'server.log').read_text(encoding='utf-8', errors='replace'))
@@ -131,7 +143,7 @@ def main():
                 assert process.returncode == 0, process.returncode
     for name, fingerprint in fingerprints.items():
         assert hashlib.sha256((SOURCE / f'{name}.xlsx').read_bytes()).hexdigest() == fingerprint
-    print(json.dumps({'bind_D006_Q': True, 'valid_body_above_global_1MiB': True, 'large_workbook_bytes': len(sources['D006']), 'catalog_and_sheet_available': True, 'no_overwrite': True, 'concurrent_first_bind': True, 'invalid_and_wrong_project_rejected': True, 'size_and_zip_bomb_rejected': True, 'macro_template_traversal_rejected': True, 'token_origin_guard': True, 'originals_unchanged': True, 'temporary_files_cleaned': True}, indent=2))
+    print(json.dumps({'bind_D006_Q': True, 'valid_body_above_global_1MiB': True, 'large_workbook_bytes': len(sources['D006']), 'catalog_and_sheet_available': True, 'no_overwrite': True, 'concurrent_first_bind': True, 'invalid_rejected_dynamic_projects_supported': True, 'size_and_zip_bomb_rejected': True, 'macro_template_traversal_rejected': True, 'malformed_columns_merges_rejected_without_crash': True, 'token_origin_guard': True, 'originals_unchanged': True, 'temporary_files_cleaned': True}, indent=2))
 
 
 if __name__ == '__main__':

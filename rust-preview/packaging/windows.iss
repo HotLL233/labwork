@@ -1,4 +1,4 @@
-#define Version "0.0.2-alpha.1-grid.5"
+#define Version "0.0.2-alpha.1-grid.6"
 [Setup]
 AppId=LabworkRustPlatform
 AppName=理化检测平台 Rust 验证版
@@ -32,9 +32,12 @@ Source: "..\assets\labwork.ico"; DestDir: "{app}\versions\{#Version}"; Flags: ig
 Source: "..\README.md"; DestDir: "{app}\versions\{#Version}"; Flags: ignoreversion
 Source: "安装说明.txt"; DestDir: "{app}\versions\{#Version}"; Flags: ignoreversion
 
+[InstallDelete]
+Type: files; Name: "{group}\工作簿副本目录.lnk"
+
 [Icons]
 Name: "{group}\启动理化检测平台（托盘）"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "托盘双击打开页面，右键正常停止"
-Name: "{group}\工作簿副本目录"; Filename: "{code:DataDirectory}\workbooks"
+Name: "{group}\数据与月份目录"; Filename: "{code:DataDirectory}"
 Name: "{group}\安装与使用说明"; Filename: "{app}\versions\{#Version}\安装说明.txt"
 Name: "{group}\卸载当前版本"; Filename: "{uninstallexe}"
 
@@ -83,7 +86,7 @@ begin
   SettingsPage.Add('数据目录（可选，填写本地绝对路径）：', False);
   SettingsPage.Add('服务器固定私网 IPv4（可选）：', False);
   SettingsPage.Add('内网访问口令（至少12字符，重装需重新输入）：', True);
-  SettingsPage.Values[0] := ExpandConstant('{param:PORT|' + GetPreviousData('Port', '18807') + '}');
+  SettingsPage.Values[0] := ExpandConstant('{param:PORT|' + GetPreviousData('Port', '18809') + '}');
   SettingsPage.Values[1] := ExpandConstant('{param:DATADIR|' + GetPreviousData('DataDirectory', DefaultData) + '}');
   SettingsPage.Values[2] := ExpandConstant('{param:LANIP|' + GetPreviousData('LanIP', '') + '}');
   PasswordFile := ExpandConstant('{param:ACCESSPASSFILE|}');

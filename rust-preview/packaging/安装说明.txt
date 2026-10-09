@@ -1,7 +1,7 @@
-理化检测平台 Rust 验证版 0.0.2-alpha.1-grid.5
+理化检测平台 Rust 验证版 0.0.2-alpha.1-grid.6
 
 中文安装器支持端口、数据目录和局域网访问设置。
-默认端口 18807。服务器固定私网 IPv4 留空表示仅本机访问。
+默认端口 18809。服务器固定私网 IPv4 留空表示仅本机访问。
 启用局域网时填写服务器实际固定私网 IPv4（10.x、172.16–31.x、192.168.x），
 并设置至少12字符的访问口令。不能填写 0.0.0.0 或 127.0.0.1。
 客户端在同网段浏览器打开 http://服务器IP:端口，并输入访问口令。
@@ -15,14 +15,15 @@
 1. 双击 labwork-preview.exe 或开始菜单“启动理化检测平台（托盘）”。
    图标可能在 Windows 任务栏“^”隐藏图标区。
 2. 双击托盘图标打开平台；启用内网时按页面提示输入访问口令。
-3. 在页面选择项目，使用“导入工作簿”上传对应 XLSX 副本，再选择方法录入。
-   安装包不含业务工作簿。也可打开“工作簿副本目录”，手工放入 D006.xlsx 或 Q.xlsx。
+3. 使用页面“导入工作簿”上传 XLSX，自动生成项目和工作表目录。
+   D006、Q 已接入14个计算方法；其余项目可浏览原表，不会猜测其计算方法。
+   安装包不含业务工作簿，请导入副本。
 4. 右键托盘“停止平台并退出”，等待图标消失后再升级或卸载。
 
 局域网防火墙：
 安装器不会自动提权或修改防火墙。规则仅放行指定服务器私网IP及同网段来源，不要求修改网络类型。
 由管理员在 PowerShell 按服务器实际私网IP和安装时的端口执行以下规则；当前现场示例为172.28.10.177、端口1234：
-New-NetFirewallRule -DisplayName 'LabworkRust-grid5-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 172.28.10.177 -LocalPort 1234 -RemoteAddress LocalSubnet -Profile Any
+New-NetFirewallRule -DisplayName 'LabworkRust-grid6-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 172.28.10.177 -LocalPort 1234 -RemoteAddress LocalSubnet -Profile Any
 请替换为实际固定私网IP与端口；该规则适用于当前网络类型，但仍只允许指定本地IP和同网段来源。
 客户端地址示例：http://172.28.10.177:1234（替换为服务器实际地址与端口）。
 
@@ -30,7 +31,7 @@ New-NetFirewallRule -DisplayName 'LabworkRust-grid5-LAN' -Direction Inbound -Act
 程序旁 labwork.json 保存 port、data_dir、lan_ip、access_password。
 访问口令仅保存在服务器本地配置中，不在页面或安装日志回显；妥善保护配置文件。
 局域网重装需重新输入访问口令；端口、目录和IP会记住上次安装选项。
-静默安装支持 /PORT=18807 /DATADIR="D:\LabworkData" /LANIP=192.168.1.50。
+静默安装支持 /PORT=18809 /DATADIR="D:\LabworkData" /LANIP=192.168.1.50。
 口令请用 /ACCESSPASSFILE="D:\临时口令.txt" 读取UTF8文件，勿把口令放命令行；完成后删除临时文件。
 便携包直接解压并双击程序，默认本机模式，按需要编辑上述配置后重启。
 安装根目录固定为“理化检测平台”，程序按 versions/版本号 隔离保存，开始菜单统一指向当前版本。卸载保留数据，回退前备份整个数据目录。
@@ -40,3 +41,8 @@ New-NetFirewallRule -DisplayName 'LabworkRust-grid5-LAN' -Direction Inbound -Act
 安装与旧版衔接：固定根目录为 %LOCALAPPDATA%\Programs\理化检测平台，程序位于 versions\版本号，默认数据在根目录 data。升级复用同一产品安装位置和设置，保留旧版本程序文件。安装器发现旧 grid.3/grid.4 后会提示其路径；先从旧版托盘退出，再在数据目录栏选择旧安装目录的 data（若旧版自定义过目录则选择原自定义目录），即可继续使用已有记录；这一步是选择既有目录，不是复制迁移或覆盖文件。旧安装目录及旧卸载项保留，新版不删除旧数据。正在使用的数据目录会拒绝安装。回退前退出当前实例，再运行保留的旧版本 EXE；同一数据目录不能同时运行多个实例。
 
 首次从旧 grid.3/grid.4 升级时，默认把新的中文产品目录设在旧安装目录的同级；检测到带平台标记的旧 data 会预填为数据来源，不复制或覆盖。已安装新产品后继续沿用其安装位置和设置。选择全新的独立数据目录不要求停止无关旧实例；如选择旧版自定义目录，必须手动确认旧实例已退出。口令长度为12至256字符。
+
+月份与回退：
+页面按月份管理工作簿，历史月只读。点击“新建月份”并确认后，以上月复制生成空白模板，保留格式、公式及参数，清除日期、批号、录入值与结果。未知工作表需先确认可清空范围，程序不会猜测。
+工作文件保存在 data\months\YYYY-MM\workbooks。首次使用会将旧 data\workbooks 复制到首个月份，旧目录原件保留；后续新数据只写月份目录。
+升级前停止平台并备份整个 data；如需回退 grid.5，退出当前版本后启动保留的 grid.5，并恢复升级前备份到独立目录。grid.6 新月份中的记录不会自动同步回旧 workbooks，不可将回退视为无损合并。请保留两份数据，核对新增记录后再决定正式切换。
