@@ -143,9 +143,42 @@ fn display(value:&str,format:&str,numeric:bool,date1904:bool)->String{
     let decimals=format.split('.').nth(1).map(|s|s.chars().take_while(|c|*c=='0'||*c=='#').count()).unwrap_or(0).min(8);
     format!("{n:.decimals$}{suffix}")
 }
+#[derive(Default)]
+struct LabelGroup { date:String, batch:String, date_row:u32, batch_row:u32 }
+impl LabelGroup {
+    fn observe(&mut self,date:&str,batch:&str,row:u32)->(bool,bool) {
+        let same_date=!date.is_empty()&&date==self.date;
+        if !date.is_empty()&&!same_date {self.date=date.into();self.date_row=row;self.batch.clear();self.batch_row=0;}
+        let same_batch=!self.date.is_empty()&&!batch.is_empty()&&batch==self.batch;
+        if !batch.is_empty()&&!same_batch {self.batch=batch.into();self.batch_row=row;}
+        (same_date,same_batch)
+    }
+}
+fn historical_labels(d:&Document<'_>,book:&Book,method:&Method)->Result<(HashSet<String>,BTreeMap<u32,Vec<u32>>,LabelGroup),String>{
+    let mut groups=LabelGroup::default();let mut hidden=HashSet::new();let mut context=BTreeMap::new();
+    let mut cells=BTreeMap::new();
+    for cell in d.descendants().filter(|n|n.has_tag_name("c")){cells.insert(attr(cell,"r"),cell);}
+    let mut merged=Vec::new();
+    for cell in d.descendants().filter(|n|n.has_tag_name("mergeCell")) {
+        let range=attr(cell,"ref");let mut ends=range.split(':');let a=coord(ends.next().ok_or("合并范围无效")?)?;let b=coord(ends.next().unwrap_or(&range))?;merged.push((a,b));
+    }
+    for row in 4..=last_data_row(book,method)? {
+        let references=[format!("{}{row}",method.columns["date"]),format!("{}{row}",method.columns["batch"])];
+        let values=references.iter().map(|r|cells.get(r).map(|n|cell_value(*n,&book.strings)).transpose().map(|v|v.unwrap_or_default())).collect::<Result<Vec<_>,_>>()?;
+        let date=cell_date(&values[0],book.date1904).map(|d|d.to_string()).unwrap_or_else(||values[0].clone());
+        let repeated=groups.observe(&date,&values[1],row);
+        for (reference,duplicate) in references.iter().zip([repeated.0,repeated.1]) {
+            let position=coord(reference)?;
+            if duplicate&&cells.get(reference).is_some_and(|n|!n.children().any(|n|n.has_tag_name("f")))&&!merged.iter().any(|(a,b)|position.0>=a.0&&position.0<=b.0&&position.1>=a.1&&position.1<=b.1) {hidden.insert(reference.clone());}
+        }
+        context.insert(row,vec![groups.date_row,groups.batch_row].into_iter().filter(|r|*r>=4).collect());
+    }
+    Ok((hidden,context,groups))
+}
 pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
     let sheet=&method.sheet;
     let book=read(bytes)?;let path=target(&book,sheet)?;let d=doc(&book.parts[path])?;let (css,num)=styles(&book)?;
+    let (hidden,context,_)=historical_labels(&d,&book,method)?;
     let mut all=BTreeMap::new();let mut heights=BTreeMap::new();let mut max_col=1;let mut max_row=3;
     for row in d.descendants().filter(|n|n.has_tag_name("row")){
         let r=attr(row,"r").parse::<u32>().map_err(|_|"行号无效")?;
@@ -157,7 +190,7 @@ pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
             let numeric=!matches!(cell.attribute("t"),Some("s"|"inlineStr"|"str"|"e"|"b"));
             let is_date=r>=4&&reference.trim_end_matches(|c:char|c.is_ascii_digit())==method.columns["date"];
             let shown=if is_date {cell_date(&value,book.date1904).map(|d|d.to_string()).unwrap_or_else(||value.clone())}else{display(&value,num.get(style).map(String::as_str).unwrap_or("General"),numeric,book.date1904)};
-            all.insert((r,c),json!({"ref":reference,"value":shown,"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
+            all.insert((r,c),json!({"ref":reference,"value":if hidden.contains(&reference){String::new()}else{shown},"raw":value,"formula":formula,"style":style,"highlight":highlight.contains(&r)}));
         }
     }
     max_col=max_col.min(40); // shortcut: method preview displays A:AN; wider templates need pagination before onboarding.
@@ -169,7 +202,9 @@ pub fn view(bytes:&[u8],method:&Method,highlight:&[u32])->Result<Value,String>{
     }
     let mut merges=Vec::new();
     for n in d.descendants().filter(|n|n.has_tag_name("mergeCell")){let range=attr(n,"ref");let mut bounds=range.split(':');let a=coord(bounds.next().ok_or("合并范围无效")?)?;let b=coord(bounds.next().unwrap_or(&range))?;merges.push(json!({"row":a.0,"col":a.1,"rowspan":b.0-a.0+1,"colspan":b.1-a.1+1}));}
-    let tail=max_row.saturating_sub(12).max(4);let selected=(1..=3).chain(tail..=max_row).chain(highlight.iter().copied()).collect::<std::collections::BTreeSet<_>>();
+    let tail=max_row.saturating_sub(12).max(4);let mut selected=(1..=3).chain(tail..=max_row).chain(highlight.iter().copied()).collect::<std::collections::BTreeSet<_>>();
+    // Keep group headers visible when the tail starts halfway through a day's results.
+    for row in selected.clone(){if let Some(anchors)=context.get(&row){selected.extend(anchors);}}
     let rows=selected.iter().map(|r|json!({"number":r,"height":heights.get(r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(*r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
     Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"tail_start":tail,"sheet_names":book.sheets.keys().collect::<Vec<_>>()}))
 }
@@ -198,13 +233,7 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         if r==3{source_styles.insert(col,attr(cell,"s"));}
     }
     if request.entries.len()!=outputs.len()||outputs.is_empty(){return Err("计算行数不一致".into());}
-    let (mut previous_date,mut previous_batch)=(String::new(),String::new());
-    for r in 4..=last {
-        if let Some(v)=values.get(&format!("{}{r}",method.columns["date"])).filter(|v|!v.is_empty()) {
-            let date=cell_date(v,book.date1904).map(|d|d.to_string()).unwrap_or_else(||v.clone());if date!=previous_date {previous_batch.clear();}previous_date=date;
-        }
-        if let Some(v)=values.get(&format!("{}{r}",method.columns["batch"])).filter(|v|!v.is_empty()){previous_batch=v.clone();}
-    }
+    let (hidden,_,mut groups)=historical_labels(&d,&book,method)?;
     let mut replacements=BTreeMap::new();
     let (_,formats)=styles(&book)?;
     let date_col=&method.columns["date"];
@@ -238,10 +267,13 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         if row.attributes.get("r").and_then(|r|r.parse::<u32>().ok()).is_some_and(|r|r>=4&&r<=last) {
             for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element) {
                 let reference=cell.attributes.get("r").cloned().unwrap_or_default();
+                if hidden.contains(&reference) {
+                    cell.attributes.remove("t");cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="is"));continue;
+                }
                 if reference.trim_end_matches(|c:char|c.is_ascii_digit())==date_col&& !matches!(cell.attributes.get("t").map(String::as_str),Some("s"|"inlineStr"|"str"|"e"|"b")) {
                     if let Some(date)=values.get(&reference).and_then(|v|cell_date(v,book.date1904)) {
                         let serial=date_serial(date,book.date1904).to_string();
-                        if cell.get_child("f").is_none()||values.get(&reference)==Some(&serial) {
+                        if cell.get_child("f").is_none() {
                             if let Some(v)=cell.get_mut_child("v"){v.children=vec![XMLNode::Text(serial)];}
                             if let Some(style)=source_styles.get(date_col){cell.attributes.insert("s".into(),style.clone());}
                         }
@@ -256,11 +288,11 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         let mut raw=entry.measurement.clone();if method.kind=="water_diluted"{if let Some(value)=raw.remove("result"){raw.insert("raw_result".into(),value);}}
         raw.extend(outputs[index].clone());
         let date=chrono::NaiveDate::parse_from_str(&entry.date,"%Y-%m-%d").map_err(|_|"日期无效")?;
-        let date_value=if entry.date==previous_date {String::new()}else{date_serial(date,book.date1904).to_string()};
-        let batch_value=if entry.date==previous_date&&entry.batch==previous_batch {String::new()}else{entry.batch.clone()};
+        let repeated=groups.observe(&entry.date,&entry.batch,*row_no);
+        let date_value=if repeated.0 {String::new()}else{date_serial(date,book.date1904).to_string()};
+        let batch_value=if repeated.1 {String::new()}else{entry.batch.clone()};
         expected_labels.push((date_value.clone(),batch_value.clone()));
         raw.extend(Values::from([("date".into(),date_value),("batch".into(),batch_value),("notes".into(),entry.notes.clone())]));
-        previous_date=entry.date.clone();previous_batch=entry.batch.clone();
         let formulas=calc::formulas(&method.kind,&method.columns,*row_no,&method.params);
         data.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="row"&&e.attributes.get("r")==Some(&row_no.to_string())));
         let mut row=el("row");row.attributes.insert("r".into(),row_no.to_string());
@@ -297,6 +329,51 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn historical_labels_keep_raw_context_formulas_and_cross_day_batches() {
+        let projects:Vec<crate::Project>=serde_json::from_str(include_str!("../catalog.json")).unwrap();
+        let method=projects.iter().find(|p|p.code=="D006").unwrap().methods.iter().find(|m|m.key=="chloride").unwrap();
+        let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
+        let sheet=format!(r#"<worksheet xmlns="{MAIN}"><sheetData>
+          <row r="1"><c r="B1" t="inlineStr"><is><t>批号</t></is></c><c r="C1" t="inlineStr"><is><t>质量</t></is></c><c r="D1" t="inlineStr"><is><t>体积</t></is></c></row>
+          <row r="3"><c r="A3" s="0"/></row>
+          <row r="4"><c r="A4"><v>46303</v></c><c r="B4" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C4"><v>1</v></c></row>
+          <row r="5"><c r="A5"><v>20261008</v></c><c r="B5" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C5"><v>2</v></c></row>
+          <row r="6"><c r="A6"><v>46304</v></c><c r="B6" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C6"><v>3</v></c></row>
+          <row r="7"><c r="B7" t="inlineStr"><is><t>LOT-1</t></is></c></row>
+          <row r="8"><c r="A8"><f>A6</f><v>46304</v></c></row>
+          <row r="9"><c r="B9" t="str"><f>B6</f><v>LOT-1</v></c></row>
+          <row r="10"><c r="A10"><v>46304</v></c></row>
+          <row r="24"><c r="C24"><v>4</v></c><c r="E24"><f>C24*2</f><v>8</v></c></row>
+        </sheetData><mergeCells count="1"><mergeCell ref="A10:A11"/></mergeCells></worksheet>"#);
+        for (name,xml) in [
+            ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{}" sheetId="1" r:id="rId1"/></sheets></workbook>"#,method.sheet)),
+            ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#.into()),
+            ("xl/styles.xml",format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="1"><xf numFmtId="0"/></cellXfs></styleSheet>"#)),
+            ("xl/worksheets/sheet1.xml",sheet),
+        ] {zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(xml.as_bytes()).unwrap();}
+        let source=zip.finish().unwrap().into_inner();
+        let view=view(&source,method,&[5,7,8,9,10]).unwrap();
+        let cell=|reference:&str|view["rows"].as_array().unwrap().iter().flat_map(|r|r["cells"].as_array().unwrap()).find(|c|c["ref"]==reference).unwrap();
+        assert_eq!(cell("A5")["value"],"");assert_eq!(cell("A5")["raw"],"20261008");
+        assert_eq!(cell("B5")["value"],"");assert_eq!(cell("B6")["value"],"LOT-1");assert_eq!(cell("B7")["value"],"");
+        assert_eq!(cell("A6")["value"],"2026-10-09");
+        assert_eq!(cell("A8")["formula"],"A6");assert_eq!(cell("B9")["value"],"LOT-1");assert_eq!(cell("A10")["value"],"2026-10-09");
+        let request:Request=serde_json::from_value(json!({"project":"D006","method":"chloride","entries":[{"date":"2026-10-09","batch":"LOT-1","measurement":{"mass":"1","volume":"1"}},{"date":"2026-10-10","batch":"LOT-1","measurement":{"mass":"2","volume":"2"}}]})).unwrap();
+        let outputs=request.entries.iter().map(|e|calc::calculate(&method.kind,&e.measurement,&method.params).unwrap()).collect::<Vec<_>>();
+        let (candidate,rows)=append(&source,method,&request,&outputs).unwrap();assert_eq!(rows,vec![25,26]);
+        let book=read(&candidate).unwrap();let d=doc(&book.parts["xl/worksheets/sheet1.xml"]).unwrap();
+        let cell=|reference:&str|d.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();
+        for reference in ["A5","B5","B7","A25","B25"] {assert_eq!(cell_value(cell(reference),&book.strings).unwrap(),"");}
+        assert_eq!(cell_value(cell("B6"),&book.strings).unwrap(),"LOT-1");
+        assert_eq!(cell_value(cell("B26"),&book.strings).unwrap(),"LOT-1");
+        assert_eq!(cell_value(cell("A26"),&book.strings).unwrap(),"46305");
+        for (reference,formula) in [("A8","A6"),("B9","B6"),("E24","C24*2")] {assert_eq!(cell(reference).children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));}
+        assert_eq!(cell_value(cell("C5"),&book.strings).unwrap(),"2");
+        assert!(d.descendants().any(|n|n.has_tag_name("mergeCell")&&n.attribute("ref")==Some("A10:A11")));
+        let source_book=read(&source).unwrap();let source_doc=doc(&source_book.parts["xl/worksheets/sheet1.xml"]).unwrap();
+        assert_eq!(cell_value(source_doc.descendants().find(|n|n.attribute("r")==Some("A5")).unwrap(),&source_book.strings).unwrap(),"20261008");
+    }
     #[test]
     fn excel_date_systems_and_early_1900() {
         for date in ["1900-01-01","1900-02-28","1900-03-01","2026-10-09","2100-12-31"] {

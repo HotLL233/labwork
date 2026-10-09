@@ -3,7 +3,7 @@ import hashlib,json,subprocess,uuid,winreg
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
-version='0.0.2-alpha.1-grid.2'
+version='0.0.2-alpha.1-grid.3'
 installer=Path('C:/labwork/releases')/f'v{version}/installer'/f'Labwork-Rust-{version}-Setup.exe'
 key=fr'Software\Microsoft\Windows\CurrentVersion\Uninstall\LabworkRustPreview-{version}_is1'
 try:

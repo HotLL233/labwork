@@ -1,4 +1,4 @@
-#define Version "0.0.2-alpha.1-grid.2"
+#define Version "0.0.2-alpha.1-grid.3"
 [Setup]
 AppId=LabworkRustPreview-{#Version}
 AppName=理化检测平台 Rust 验证版
@@ -36,11 +36,13 @@ Name: "{app}\data"; Flags: uninsneveruninstall
 Name: "{app}\data\workbooks"; Flags: uninsneveruninstall
 
 [Icons]
-Name: "{group}\启动理化检测平台"; Filename: "{app}\启动平台.cmd"; WorkingDir: "{app}"; Comment: "启动本机服务器，按 Ctrl+C 停止"
-Name: "{group}\打开平台页面"; Filename: "http://127.0.0.1:18804"
+Name: "{group}\启动理化检测平台（托盘）"; Filename: "{app}\labwork-preview.exe"; Parameters: "--tray --home ""{app}\data"""; WorkingDir: "{app}"; Comment: "托盘双击打开页面，右键正常停止"
 Name: "{group}\工作簿副本目录"; Filename: "{app}\data\workbooks"
 Name: "{group}\安装与使用说明"; Filename: "{app}\安装说明.txt"
 Name: "{group}\卸载当前版本"; Filename: "{uninstallexe}"
+
+[Run]
+Filename: "{app}\labwork-preview.exe"; Parameters: "--tray --home ""{app}\data"""; Description: "启动理化检测平台（托盘）"; Flags: postinstall nowait skipifsilent unchecked
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;

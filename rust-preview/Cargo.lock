@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "labwork-preview"
-version = "0.0.2-alpha.1-grid.2"
+version = "0.0.2-alpha.1-grid.3"
 dependencies = [
  "axum",
  "bigdecimal",
@@ -436,6 +436,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "windows-sys",
  "xmltree",
  "zip",
 ]

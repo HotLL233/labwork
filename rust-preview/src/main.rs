@@ -1,5 +1,7 @@
 mod calc;
 mod workbook;
+#[cfg(windows)]
+mod tray;
 
 use axum::{Json, Router, extract::{DefaultBodyLimit, Path, State}, http::{HeaderMap, StatusCode, header}, middleware::{self, Next}, response::{Html, IntoResponse, Response}, routing::{get, post}};
 use rusqlite::{Connection, params};
@@ -21,7 +23,7 @@ struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: Strin
 type Shared = Arc<Mutex<App>>;
 
 async fn local_host(request:axum::extract::Request,next:Next)->Response {
-    if !matches!(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()),Some("127.0.0.1:18804"|"localhost:18804")) {
+    if !matches!(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()),Some("127.0.0.1:18805"|"localhost:18805")) {
         return (StatusCode::FORBIDDEN,"This preview accepts localhost only").into_response();
     }
     let mut response=next.run(request).await;
@@ -71,14 +73,14 @@ impl App {
 
 async fn index(State(state): State<Shared>) -> Html<String> {
     let app=state.lock().unwrap();
-    Html(include_str!("../web/index.html").replace("__TOKEN__",&app.token))
+    Html(include_str!("../web/index.html").replace("__TOKEN__",&app.token).replace("__VERSION__",env!("CARGO_PKG_VERSION")))
 }
 async fn css() -> impl IntoResponse { ([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css")) }
 async fn js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/app.js")) }
 async fn grid_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/grid.js")) }
 async fn catalog(State(state): State<Shared>) -> Json<Value> {
     let app=state.lock().unwrap();
-    Json(json!({"version":env!("CARGO_PKG_VERSION"),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
+    Json(json!({"version":env!("CARGO_PKG_VERSION"),"data_directory":app.home.canonicalize().unwrap_or_else(|_|app.home.clone()).display().to_string(),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
 }
 async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,String)>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap();
@@ -91,7 +93,7 @@ async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,S
 fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
     if headers.get("x-labwork-token").and_then(|v|v.to_str().ok()) != Some(&app.token) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"页面已过期，请刷新后重试"}))));}
     if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()) {
-        if origin!="http://127.0.0.1:18804" && origin!="http://localhost:18804" {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
+        if origin!="http://127.0.0.1:18805" && origin!="http://localhost:18805" {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
     }
     Ok(())
 }
@@ -150,8 +152,21 @@ async fn history(State(state):State<Shared>) -> Result<Json<Value>,Error> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(),Box<dyn std::error::Error>> {
+async fn main() {
+    let tray_mode=std::env::args().any(|a|a=="--tray");
+    #[cfg(windows)]
+    if tray_mode {tray::hide_console();}
+    if let Err(err)=run(tray_mode).await {
+        eprintln!("{err}");
+        #[cfg(windows)]
+        if tray_mode {tray::show_error(&err.to_string());}
+        std::process::exit(1);
+    }
+}
+
+async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let args=std::env::args().collect::<Vec<_>>();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:18805").await.map_err(|e|format!("理化检测平台 {} 启动失败：{e}\n本版本需要18805端口。若已经运行，请从已有托盘图标打开；请勿使用旧18802或18805页面。",env!("CARGO_PKG_VERSION")))?;
     let home=args.windows(2).find(|v|v[0]=="--home").map(|v|PathBuf::from(&v[1])).unwrap_or(PathBuf::from("runtime/rust-preview"));
     let marker=home.join(".labwork-rust-preview");
     if home.exists() && !marker.exists() && fs::read_dir(&home)?.next().is_some() {return Err("拒绝使用已有且未标记的目录；请使用独立预览目录".into());}
@@ -160,14 +175,21 @@ async fn main() -> Result<(),Box<dyn std::error::Error>> {
     let db=Connection::open(home.join("preview.sqlite3"))?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
+    let (shutdown_tx,shutdown_rx)=tokio::sync::oneshot::channel::<()>();
+    #[cfg(windows)]
+    let _tray=if tray_mode {Some(tray::start(home.clone(),shutdown_tx)?)}else{drop(shutdown_tx);None};
+    #[cfg(not(windows))]
+    if tray_mode {return Err("托盘模式仅支持Windows".into());}
     let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id()}));
     let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js)).route("/grid.js",get(grid_js))
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
         .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))
         .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn(local_host)).with_state(state);
     // This validation build intentionally cannot bind to a LAN interface before account migration.
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:18804").await?;
-    println!("Rust + SQLite validation: http://127.0.0.1:18804 ; Ctrl+C to stop");
-    axum::serve(listener,router).with_graceful_shutdown(async{let _=tokio::signal::ctrl_c().await;}).await?;
+    println!("Rust + SQLite validation: http://127.0.0.1:18805 ; Ctrl+C to stop");
+    axum::serve(listener,router).with_graceful_shutdown(async move {
+        if tray_mode {tokio::select!{_ = tokio::signal::ctrl_c()=>{},_ = shutdown_rx=>{}}}
+        else {let _=tokio::signal::ctrl_c().await;}
+    }).await?;
     Ok(())
 }
