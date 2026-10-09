@@ -12,4 +12,8 @@
 
 检查：`python packaging/test_windows_setup.py` 覆盖成功/异常的 ACL 恢复及子进程错误日志。`packaging/verify_admin_setup.py` 在全新隔离目录重现旧权限错误，再检查修订流程、实际 PostgreSQL 连接、12 项目/14 方法和权限恢复；不注册系统服务，不修改已安装数据库。管理员检查报告保存在 `C:\labwork\tmp\admin-r1-check.json`。
 
-已通过：2 项 Windows 安装回归测试、9 项 Django 测试、Python 编译检查、Inno Setup 编译，以及安装包 `/TESTMODE /CURRENTUSER` 解包检查（退出码 0，`control.py`、`acl.ps1` 与修订源码 SHA256 一致）。Windows 回归测试模拟管理员身份判断，但使用真实文件权限操作；不能替代管理员隔离验证。当前管理员隔离验证和正式服务安装尚待执行，不能据此认定本机安装已成功。
+已通过：2 项 Windows 安装回归测试、9 项 Django 测试、Python 编译检查、Inno Setup 编译，以及安装包 `/TESTMODE /CURRENTUSER` 解包检查（退出码 0，`control.py`、`acl.ps1` 与修订源码 SHA256 一致）。
+
+2026-10-09 管理员隔离验证已通过：旧权限设置下 `initdb` 返回 1，原生错误为读取密码文件时 `Permission denied`；修订流程返回 0，实际 PostgreSQL 连接核对 12 项目、14 方法成功，初始化及再次启停后原 DACL 均恢复。测试未注册系统服务，隔离 PostgreSQL 已停止。报告的原安装目录元数据表明 `config.json`、`schema.json` 和 `database` 均不存在，因此当前失败安装无需清理数据目录，可直接使用 r1 在原安装路径重试。
+
+正式安装器的服务注册、LocalService 运行和浏览器访问仍需在本机重装后确认；管理员隔离验证通过不代表正式服务已经安装成功。Windows 安装修订不改变 Docker 包，Docker 继续使用原 v0.0.1 发布包。
