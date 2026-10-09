@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+mod config;
 mod calc;
 mod workbook;
 #[cfg(windows)]
@@ -19,11 +21,12 @@ fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 struct Method { key: String, name: String, kind: String, params: BTreeMap<String,String>, fields: Vec<calc::Field>, columns: BTreeMap<String,String>, sheet: String }
 #[derive(Clone, Serialize, Deserialize)]
 struct Project { code: String, name: String, methods: Vec<Method> }
-struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: String }
+struct App { home: PathBuf, db: Connection, projects: Vec<Project>, token: String, port: u16 }
 type Shared = Arc<Mutex<App>>;
 
-async fn local_host(request:axum::extract::Request,next:Next)->Response {
-    if !matches!(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()),Some("127.0.0.1:18805"|"localhost:18805")) {
+async fn local_host(State(state):State<Shared>,request:axum::extract::Request,next:Next)->Response {
+    let port=state.lock().unwrap().port;
+    if !config::allowed_host(request.headers().get(header::HOST).and_then(|h|h.to_str().ok()).unwrap_or(""),port) {
         return (StatusCode::FORBIDDEN,"This preview accepts localhost only").into_response();
     }
     let mut response=next.run(request).await;
@@ -73,14 +76,14 @@ impl App {
 
 async fn index(State(state): State<Shared>) -> Html<String> {
     let app=state.lock().unwrap();
-    Html(include_str!("../web/index.html").replace("__TOKEN__",&app.token).replace("__VERSION__",env!("CARGO_PKG_VERSION")))
+    Html(include_str!("../web/index.html").replace("__TOKEN__",&app.token).replace("__VERSION__",env!("CARGO_PKG_VERSION")).replace("__PORT__",&app.port.to_string()))
 }
 async fn css() -> impl IntoResponse { ([(header::CONTENT_TYPE,"text/css; charset=utf-8")],include_str!("../web/app.css")) }
 async fn js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/app.js")) }
 async fn grid_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/grid.js")) }
 async fn catalog(State(state): State<Shared>) -> Json<Value> {
     let app=state.lock().unwrap();
-    Json(json!({"version":env!("CARGO_PKG_VERSION"),"data_directory":app.home.canonicalize().unwrap_or_else(|_|app.home.clone()).display().to_string(),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
+    Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"data_directory":app.home.canonicalize().unwrap_or_else(|_|app.home.clone()).display().to_string(),"projects":app.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"methods":p.methods,"available":app.home.join("workbooks").join(format!("{}.xlsx",p.code)).exists()})).collect::<Vec<_>>()}))
 }
 async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,String)>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap();
@@ -93,7 +96,7 @@ async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,S
 fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
     if headers.get("x-labwork-token").and_then(|v|v.to_str().ok()) != Some(&app.token) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"页面已过期，请刷新后重试"}))));}
     if let Some(origin)=headers.get(header::ORIGIN).and_then(|v|v.to_str().ok()) {
-        if origin!="http://127.0.0.1:18805" && origin!="http://localhost:18805" {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
+        if !origin.strip_prefix("http://").is_some_and(|host|config::allowed_host(host,app.port)) {return Err((StatusCode::FORBIDDEN,Json(json!({"error":"拒绝跨站提交"}))));}
     }
     Ok(())
 }
@@ -153,9 +156,7 @@ async fn history(State(state):State<Shared>) -> Result<Json<Value>,Error> {
 
 #[tokio::main]
 async fn main() {
-    let tray_mode=std::env::args().any(|a|a=="--tray");
-    #[cfg(windows)]
-    if tray_mode {tray::hide_console();}
+    let tray_mode=cfg!(windows) && !std::env::args().any(|a|a=="--headless");
     if let Err(err)=run(tray_mode).await {
         eprintln!("{err}");
         #[cfg(windows)]
@@ -165,9 +166,10 @@ async fn main() {
 }
 
 async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
-    let args=std::env::args().collect::<Vec<_>>();
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:18805").await.map_err(|e|format!("理化检测平台 {} 启动失败：{e}\n本版本需要18805端口。若已经运行，请从已有托盘图标打开；请勿使用旧18802或18805页面。",env!("CARGO_PKG_VERSION")))?;
-    let home=args.windows(2).find(|v|v[0]=="--home").map(|v|PathBuf::from(&v[1])).unwrap_or(PathBuf::from("runtime/rust-preview"));
+    let settings=config::load()?;
+    let port=settings.port;
+    let home=settings.data_dir;
+    let listener=tokio::net::TcpListener::bind(("127.0.0.1",port)).await.map_err(|e|format!("理化检测平台启动失败：端口 {port} 无法使用（{e}）。请检查是否已经运行，或修改 labwork.json 中的端口。"))?;
     let marker=home.join(".labwork-rust-preview");
     if home.exists() && !marker.exists() && fs::read_dir(&home)?.next().is_some() {return Err("拒绝使用已有且未标记的目录；请使用独立预览目录".into());}
     fs::create_dir_all(&home)?; fs::write(&marker,"0.0.2-alpha.1; local preview only")?;
@@ -177,18 +179,18 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
     let (shutdown_tx,shutdown_rx)=tokio::sync::oneshot::channel::<()>();
     #[cfg(windows)]
-    let _tray=if tray_mode {Some(tray::start(home.clone(),shutdown_tx)?)}else{drop(shutdown_tx);None};
+    let _tray=if tray_mode {Some(tray::start(home.clone(),port,shutdown_tx)?)}else{drop(shutdown_tx);None};
     #[cfg(not(windows))]
     if tray_mode {return Err("托盘模式仅支持Windows".into());}
-    let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id()}));
+    let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id(),port}));
     let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js)).route("/grid.js",get(grid_js))
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
         .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))
-        .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn(local_host)).with_state(state);
+        .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn_with_state(state.clone(),local_host)).with_state(state);
     // This validation build intentionally cannot bind to a LAN interface before account migration.
-    println!("Rust + SQLite validation: http://127.0.0.1:18805 ; Ctrl+C to stop");
+    println!("Rust + SQLite validation: http://127.0.0.1:{port} ; Ctrl+C to stop");
     axum::serve(listener,router).with_graceful_shutdown(async move {
-        if tray_mode {tokio::select!{_ = tokio::signal::ctrl_c()=>{},_ = shutdown_rx=>{}}}
+        if tray_mode {let _=shutdown_rx.await;}
         else {let _=tokio::signal::ctrl_c().await;}
     }).await?;
     Ok(())

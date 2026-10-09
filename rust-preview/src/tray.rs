@@ -1,5 +1,5 @@
 use std::{os::windows::ffi::OsStrExt, path::PathBuf, ptr::null_mut, sync::mpsc, thread};
-use windows_sys::Win32::{Foundation::*, System::{Console::FreeConsole, LibraryLoader::GetModuleHandleW}, UI::{Shell::*, WindowsAndMessaging::*}};
+use windows_sys::Win32::{Foundation::*, System::LibraryLoader::GetModuleHandleW, UI::{Shell::*, WindowsAndMessaging::*}};
 
 const CALLBACK: u32 = WM_APP + 1;
 const OPEN: usize = 1;
@@ -10,7 +10,7 @@ fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
 pub fn show_error(message: &str) {
     unsafe { MessageBoxW(null_mut(), wide(message).as_ptr(), wide("理化检测平台").as_ptr(), MB_OK | MB_ICONERROR); }
 }
-pub fn hide_console() { unsafe { FreeConsole(); } }
+
 
 pub struct Tray { window: usize, thread: Option<thread::JoinHandle<()>> }
 impl Drop for Tray {
@@ -19,7 +19,10 @@ impl Drop for Tray {
         if let Some(thread) = self.thread.take() { let _ = thread.join(); }
     }
 }
-struct State { icon: NOTIFYICONDATAW, home: PathBuf, shutdown: Option<tokio::sync::oneshot::Sender<()>>, taskbar: u32 }
+struct State { icon: NOTIFYICONDATAW, home: PathBuf, url: Vec<u16>, shutdown: Option<tokio::sync::oneshot::Sender<()>>, taskbar: u32 }
+impl Drop for State {
+    fn drop(&mut self) { unsafe { if !self.icon.hIcon.is_null() { DestroyIcon(self.icon.hIcon); } } }
+}
 fn shell_open(target: &[u16]) {
     let result = unsafe { ShellExecuteW(null_mut(), wide("open").as_ptr(), target.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
     if result as isize <= 32 { show_error("无法打开浏览器或数据目录，请检查系统默认应用。"); }
@@ -35,7 +38,7 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
             match message {
                 CALLBACK => {
                     match lparam as u32 {
-                        WM_LBUTTONDBLCLK => shell_open(&wide("http://127.0.0.1:18805")),
+                        WM_LBUTTONDBLCLK => shell_open(&(*state).url),
                         WM_RBUTTONUP | WM_CONTEXTMENU => {
                             let menu = CreatePopupMenu();
                             if !menu.is_null() {
@@ -58,7 +61,7 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
                 },
                 WM_COMMAND => {
                     match wparam & 0xffff {
-                        OPEN => shell_open(&wide("http://127.0.0.1:18805")),
+                        OPEN => shell_open(&(*state).url),
                         DATA => shell_open(&(*state).home.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>()),
                         STOP => { if let Some(sender) = (*state).shutdown.take() { let _ = sender.send(()); } },
                         _ => {}
@@ -80,8 +83,12 @@ mod tests {
     #[test]
     fn tray_registers_stops_and_cleans_up() {
         let (tx,mut rx)=tokio::sync::oneshot::channel();
-        let tray=start(std::env::temp_dir(),tx).expect("Windows tray initialization");
+        let tray=start(std::env::temp_dir(),18806,tx).expect("Windows tray initialization");
         let window=tray.window as HWND;
+        let state=unsafe{&*(GetWindowLongPtrW(window,GWLP_USERDATA) as *const State)};
+        assert_eq!(String::from_utf16_lossy(&state.url[..state.url.len()-1]),"http://127.0.0.1:18806");
+        assert!(String::from_utf16_lossy(&state.icon.szTip).contains("18806"));
+        assert!(!state.icon.hIcon.is_null());
         assert_ne!(unsafe{PostMessageW(window,WM_COMMAND,STOP,0)},0);
         let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
         loop {
@@ -94,9 +101,18 @@ mod tests {
         drop(tray);
         assert_eq!(unsafe{IsWindow(window)},0);
     }
+
+    #[test]
+    fn bundled_icon_has_expected_dib() {
+        let icon=include_bytes!("../assets/labwork.ico");
+        assert_eq!(&icon[..6], &[0,0,1,0,1,0]);
+        assert_eq!(u32::from_le_bytes(icon[18..22].try_into().unwrap()),22);
+        assert_eq!(u32::from_le_bytes(icon[22..26].try_into().unwrap()),40);
+        assert_eq!(u32::from_le_bytes(icon[14..18].try_into().unwrap()) as usize,icon.len()-22);
+    }
 }
 
-pub fn start(home: PathBuf, shutdown: tokio::sync::oneshot::Sender<()>) -> Result<Tray, String> {
+pub fn start(home: PathBuf, port: u16, shutdown: tokio::sync::oneshot::Sender<()>) -> Result<Tray, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     let thread = thread::Builder::new().name("labwork-tray".into()).spawn(move || unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
@@ -113,14 +129,20 @@ pub fn start(home: PathBuf, shutdown: tokio::sync::oneshot::Sender<()>) -> Resul
             let _ = sender.send(Err(format!("无法创建托盘窗口：{}", std::io::Error::last_os_error())));
             UnregisterClassW(class_name.as_ptr(), instance); return;
         }
-        let mut state = Box::new(State { icon: std::mem::zeroed(), home, shutdown: Some(shutdown), taskbar: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) });
+        let mut state = Box::new(State { icon: std::mem::zeroed(), home, url: wide(&format!("http://127.0.0.1:{port}")), shutdown: Some(shutdown), taskbar: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) });
         state.icon.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         state.icon.hWnd = window;
         state.icon.uID = 1;
         state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         state.icon.uCallbackMessage = CALLBACK;
-        state.icon.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
-        let tip = wide(concat!("理化检测平台 ", env!("CARGO_PKG_VERSION"), " · 127.0.0.1:18805"));
+        // The bundled ICO contains one 32-bit DIB at the standard 22-byte offset.
+        let mut icon_bits = include_bytes!("../assets/labwork.ico")[22..].to_vec();
+        state.icon.hIcon = CreateIconFromResourceEx(icon_bits.as_mut_ptr(), icon_bits.len() as u32, 1, 0x00030000, 32, 32, LR_DEFAULTCOLOR);
+        if state.icon.hIcon.is_null() {
+            let _ = sender.send(Err(format!("无法加载平台托盘图标：{}", std::io::Error::last_os_error())));
+            DestroyWindow(window); UnregisterClassW(class_name.as_ptr(), instance); return;
+        }
+        let tip = wide(&format!("理化检测平台 {} · 127.0.0.1:{port}", env!("CARGO_PKG_VERSION")));
         for (target, source) in state.icon.szTip.iter_mut().take(127).zip(tip) { *target = source; }
         SetWindowLongPtrW(window, GWLP_USERDATA, (&mut *state as *mut State) as isize);
         if Shell_NotifyIconW(NIM_ADD, &state.icon) == 0 {

@@ -21,7 +21,7 @@ root=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(root.parent))
 from records.calculations import calculate
 
-BASE='http://127.0.0.1:18805'
+BASE='http://127.0.0.1:19846'
 catalog=json.loads((root/'catalog.json').read_text(encoding='utf-8'))
 source=root.parent/'runtime/rust-preview/workbooks'
 original_hashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in source.glob('*.xlsx')}
@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
     home.mkdir();(home/'.labwork-rust-preview').write_text('test')
     shutil.copytree(source,home/'workbooks')
     log=open(Path(folder)/'server.log','w')
-    process=subprocess.Popen([str(root/'target/release/labwork-preview.exe'),'--home',str(home)],stdout=log,stderr=log)
+    process=subprocess.Popen([str(root/'target/release/labwork-preview.exe'),'--headless','--port','19846','--home',str(home)],stdout=log,stderr=log)
     try:
         for attempt in range(60):
             try:
