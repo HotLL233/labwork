@@ -83,14 +83,16 @@ function clearView(){
   sheetRequestId++;rawNext=null;$('sheet-pager').hidden=true;
   method=null;baseView=null;rows=[];undo=[];anchor=null;selection=null;invalidate();
   $('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('parameters').textContent='';
-  $('sheet-panel').hidden=true;document.querySelectorAll('.calc-only').forEach(el=>el.hidden=true);
+  $('sheet-panel').hidden=true;$('method-choice').hidden=true;document.querySelectorAll('.calc-only').forEach(el=>el.hidden=true);
 }
-async function selectSheet(key,start=1){
+async function selectSheet(key,start=1,methodKey){
   if(busy||!project)return;
   selectedSheet=project.sheets.find(item=>item.key===key);if(!selectedSheet)return;
   clearView();$('message').hidden=true;
   const code=project.code,month=catalogInfo.active_month,requestId=sheetRequestId;
-  method=project.methods.find(item=>item.key===selectedSheet.method_key)||null;
+  const choices=project.methods.filter(item=>item.sheet?.trim()===selectedSheet.name.trim()||item.key===selectedSheet.method_key);
+  method=choices.find(item=>item.key===(methodKey||selectedSheet.method_key))||choices[0]||null;
+  $('method-choice').hidden=choices.length<2;$('method-select').innerHTML=choices.map(item=>`<option value="${escape(item.key)}" ${item.key===method?.key?'selected':''}>${escape(item.name)}</option>`).join('');
   $('title').textContent=selectedSheet.name;$('breadcrumb').textContent=`${project.name} / ${code}`;
   document.querySelectorAll('#methods button').forEach(button=>button.classList.toggle('active',button.dataset.key===key));
   const editable=!!method&&writable();
@@ -121,6 +123,7 @@ async function selectProject(code,sheetKey){
   renderRules();const first=project.sheets.find(item=>item.key===sheetKey)||project.sheets[0];
   if(first)await selectSheet(first.key);else{$('title').textContent=project.name;message('此工作簿没有可显示的工作表。');}
 }
+$('method-select').onchange=()=>{if(selectedSheet)selectSheet(selectedSheet.key,1,$('method-select').value);};
 $('page-first').onclick=()=>{if(selectedSheet)selectSheet(selectedSheet.key,1);};
 $('page-next').onclick=()=>{if(selectedSheet&&rawNext)selectSheet(selectedSheet.key,rawNext);};
 $('calculate').onclick=async()=>{
@@ -182,7 +185,7 @@ function renderRules(){
   const stored=project.monthly_rules||catalogInfo.monthly_rules?.[project.code]||[];
   $('month-rules').innerHTML='<table><thead><tr><th>工作表</th><th>数据起始行</th><th>清空输入列</th><th>确认</th></tr></thead><tbody>'+project.sheets.map((item,index)=>{
     const rule=stored.find(rule=>rule.sheet===item.name)||{};
-    return `<tr data-rule="${index}"><td>${escape(item.name)}</td><td><input aria-label="${escape(item.name)} 数据起始行" type="number" min="1" max="1048576" data-rule-start value="${rule.start_row||''}" placeholder="例如 4"></td><td><input aria-label="${escape(item.name)} 清空输入列" data-rule-columns value="${escape((rule.columns||[]).join(','))}" placeholder="留空则整表保留"></td><td><input type="checkbox" data-rule-confirm aria-label="确认 ${escape(item.name)} 规则" ${project.rules_confirmed?'checked':''}></td></tr>`;
+    return `<tr data-rule="${index}"><td>${escape(item.name)}</td><td><input aria-label="${escape(item.name)} 数据起始行" type="number" min="3" max="1048576" data-rule-start value="${rule.start_row||''}" placeholder="例如 4"></td><td><input aria-label="${escape(item.name)} 清空输入列" data-rule-columns value="${escape((rule.columns||[]).join(','))}" placeholder="留空则整表保留"></td><td><input type="checkbox" data-rule-confirm aria-label="确认 ${escape(item.name)} 规则" ${project.rules_confirmed?'checked':''}></td></tr>`;
   }).join('')+'</tbody></table>';
   $('save-rules').disabled=!writable();$('month-rules').querySelectorAll('input').forEach(input=>input.disabled=!writable());
 }
@@ -192,7 +195,7 @@ $('save-rules').onclick=async()=>{
   for(const row of $('month-rules').querySelectorAll('[data-rule]')){
     if(!row.querySelector('[data-rule-confirm]').checked){message('请核对并勾选每个工作表的规则；未确认时不会生成空白月模板。');return;}
     const start=Number(row.querySelector('[data-rule-start]').value),columns=row.querySelector('[data-rule-columns]').value.toUpperCase().split(/[,，\s]+/).filter(Boolean);
-    if(!Number.isInteger(start)||start<1||start>1048576||columns.some(column=>!/^([A-Z]{1,3})$/.test(column))){message('请填写有效起始行及列字母，例如 A,B,C；清空列可留空保留整表。');return;}
+    if(!Number.isInteger(start)||start<3||start>1048576||columns.some(column=>!/^([A-Z]{1,3})$/.test(column))){message('起始行须为第3行或之后，清空列填写字母（例如 A,B,C）；留空保留整表。');return;}
     rules.push({sheet:project.sheets[+row.dataset.rule].name,start_row:start,columns:[...new Set(columns)]});
   }
   const code=project.code;

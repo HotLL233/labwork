@@ -1,6 +1,9 @@
 #define Version "0.0.2-alpha.1-grid.6"
+#ifndef AppIdValue
+  #define AppIdValue "LabworkRustPlatform"
+#endif
 [Setup]
-AppId=LabworkRustPlatform
+AppId={#AppIdValue}
 AppName=理化检测平台 Rust 验证版
 AppVersion={#Version}
 AppVerName=理化检测平台 Rust {#Version}
@@ -65,7 +68,7 @@ function DefaultInstallDirectory(Param: String): String;
 var LegacyPath: String;
 begin
   Result := ExpandConstant('{localappdata}\Programs\理化检测平台');
-  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\LabworkRustPlatform_is1', 'Inno Setup: App Path', LegacyPath) then
+  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdValue}_is1', 'Inno Setup: App Path', LegacyPath) then
     Result := LegacyPath
   else if FindLegacy(LegacyPath) then
     Result := ExtractFileDir(LegacyPath) + '\理化检测平台';
@@ -77,7 +80,7 @@ begin
   LegacyNotice := ''; DefaultData := '';
   if FindLegacy(LegacyPath) then begin
     LegacyNotice := ' 检测到旧版：' + LegacyPath + '。旧版会保留；已标记的旧 data 会预填。请先退出旧版；旧版自定义过数据目录的，请手选原目录。';
-    if not RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\LabworkRustPlatform_is1', 'Inno Setup: App Path', StablePath) then
+    if not RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdValue}_is1', 'Inno Setup: App Path', StablePath) then
       if FileExists(LegacyPath + '\data\.labwork-rust-preview') then DefaultData := LegacyPath + '\data';
   end;
   SettingsPage := CreateInputQueryPage(wpSelectDir, '平台连接与数据目录',

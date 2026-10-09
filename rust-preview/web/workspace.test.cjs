@@ -3,7 +3,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const elements=new Map(),requests=[];
 function element(id){if(!elements.has(id))elements.set(id,{value:'',files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
-const project={code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
+const project={code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',sheet:'水分',fields:[],params:{},columns:{}},{key:'water_diluted',name:'稀释水分',sheet:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
 let active='2026-10',writable=true,missingOnce=false;
 const context=vm.createContext({
   console,Date,sessionStorage:{getItem(){return '2026-10';},setItem(){},removeItem(){}},
@@ -36,6 +36,10 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   await vm.runInContext("selectSheet('s1')",context);
   assert(requests.some(request=>request.path==='/api/sheet/LAB/water'));
   assert.equal(element('browse-note').hidden,true);
+  assert.equal(element('method-choice').hidden,false);
+  await vm.runInContext("selectSheet('s1',1,'water_diluted')",context);
+  assert.equal(requests.at(-1).path,'/api/sheet/LAB/water_diluted');
+  assert.equal(vm.runInContext('selectedSheet.key',context),'s1');
   await vm.runInContext("changeMonth('2026-09')",context);
   const catalogRequest=requests.filter(request=>request.path==='/api/catalog').at(-1);
   assert.equal(catalogRequest.headers['X-Labwork-Month'],'2026-09');
@@ -45,6 +49,9 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   assert.equal(element('download-workbook').hidden,false);
   assert.equal(requests.at(-1).path,'/api/book-sheet/LAB/s1?start=1');
   assert.equal(requests.at(-1).headers['X-Labwork-Month'],'2026-09');
+  await vm.runInContext("selectSheet('s1',1,'water_diluted')",context);
+  assert.equal(requests.at(-1).path,'/api/book-sheet/LAB/s1?start=1');
+  assert.equal(element('browse-note').hidden,false);
   await vm.runInContext("changeMonth('2099-11')",context);
   assert.equal(vm.runInContext('rows[0].date',context),'2099-11-01');
   assert.equal(vm.runInContext('previewId',context),null);

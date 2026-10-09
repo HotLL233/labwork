@@ -1,11 +1,27 @@
 """Exercise the real Chinese installer with isolated settings and retained data."""
-import hashlib,json,socket,subprocess,time,tomllib,urllib.request,uuid,winreg
+import argparse,hashlib,json,socket,subprocess,time,tomllib,urllib.request,uuid,winreg
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
 version=tomllib.loads((root/'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
-installer=Path('C:/labwork/releases')/f'v{version}/installer'/f'理化检测平台-{version}-Windows-x64-安装包.exe'
-key=r'Software\Microsoft\Windows\CurrentVersion\Uninstall\LabworkRustPlatform_is1'
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--installer',type=Path)
+parser.add_argument('--app-id',default='LabworkRustPlatform')
+parser.add_argument('--report-dir',type=Path)
+args=parser.parse_args()
+installer=args.installer or Path('C:/labwork/releases')/f'v{version}/installer'/f'理化检测平台-{version}-Windows-x64-安装包.exe'
+if args.app_id!='LabworkRustPlatform':
+    assert args.app_id.startswith('LabworkRustPlatform-QA-') and args.app_id in installer.stem,'QA installer filename must identify its isolated AppId'
+key=fr'Software\Microsoft\Windows\CurrentVersion\Uninstall\{args.app_id}_is1'
+def product_registration():
+    values={}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Software\Microsoft\Windows\CurrentVersion\Uninstall\LabworkRustPlatform_is1') as handle:
+            for index in range(winreg.QueryInfoKey(handle)[1]):
+                name,value,kind=winreg.EnumValue(handle,index);values[name]=(value,kind)
+    except FileNotFoundError:pass
+    return values
+original_registration=product_registration()
 try:
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER,key):pass
 except FileNotFoundError:pass
@@ -73,5 +89,10 @@ assert run(lan_root/'unins000.exe',f'/LOG={test / "lan-uninstall.log"}')==0
 assert (lan_data/'.labwork-rust-preview').exists()
 secret_file.unlink()
 result={'install':True,'installed_binary_hash':True,'custom_port':True,'external_data_config':True,'reinstall_preserves_settings':True,'older_version_files_preserved':True,'installed_server_http':True,'no_cmd_entry':True,'uninstall':True,'external_data_preserved':True,'running_data_rejected':True,'unmarked_data_rejected':True,'invalid_ports_rejected':True,'invalid_lan_addresses_rejected':True,'lan_password_required':True,'long_password_rejected':True,'lan_config_saved':True,'password_not_in_install_log':True,'logs':str(test),'installer_bytes':installer.stat().st_size}
-(installer.parent/'安装验收.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+if args.app_id!='LabworkRustPlatform':
+    assert product_registration()==original_registration,'Real product registration changed during isolated QA'
+result.update({'app_id':args.app_id,'qa_same_source_isolated_install':args.app_id!='LabworkRustPlatform','real_registration_untouched':args.app_id!='LabworkRustPlatform','installer_path':str(installer)})
+report_dir=args.report_dir or installer.parent
+report_dir.mkdir(parents=True,exist_ok=True)
+(report_dir/'安装验收.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
 print(json.dumps(result,ensure_ascii=False))
