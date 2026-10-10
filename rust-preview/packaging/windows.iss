@@ -1,20 +1,21 @@
-#define Version "0.0.2-alpha.1-grid.6"
+#define Version "0.0.2-alpha.1-grid.7"
 #ifndef AppIdValue
   #define AppIdValue "LabworkRustPlatform"
 #endif
 [Setup]
 AppId={#AppIdValue}
-AppName=理化检测平台 Rust 验证版
+AppName=labwork
 AppVersion={#Version}
-AppVerName=理化检测平台 Rust {#Version}
+AppVerName=labwork {#Version}
 DefaultDirName={code:DefaultInstallDirectory}
-DefaultGroupName=理化检测平台
+DefaultGroupName=labwork
+UsePreviousGroup=no
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir=..\..\..\..\releases\v{#Version}\installer
-OutputBaseFilename=理化检测平台-{#Version}-Windows-x64-安装包
+OutputBaseFilename=labwork-{#Version}-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -38,17 +39,30 @@ Source: "安装说明.txt"; DestDir: "{app}\versions\{#Version}"; Flags: ignorev
 [InstallDelete]
 Type: files; Name: "{group}\工作簿副本目录.lnk"
 
+#if AppIdValue == "LabworkRustPlatform"
+Type: files; Name: "{userprograms}\理化检测平台\启动理化检测平台（托盘）.lnk"; Check: HasStableRegistration
+Type: files; Name: "{userprograms}\理化检测平台\工作簿副本目录.lnk"; Check: HasStableRegistration
+Type: files; Name: "{userprograms}\理化检测平台\数据与月份目录.lnk"; Check: HasStableRegistration
+Type: files; Name: "{userprograms}\理化检测平台\安装与使用说明.lnk"; Check: HasStableRegistration
+Type: files; Name: "{userprograms}\理化检测平台\卸载当前版本.lnk"; Check: HasStableRegistration
+#endif
+
 [Icons]
-Name: "{group}\启动理化检测平台（托盘）"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "托盘双击打开页面，右键正常停止"
+Name: "{group}\启动 labwork（托盘）"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "托盘双击打开页面，右键正常停止"
 Name: "{group}\数据与月份目录"; Filename: "{code:DataDirectory}"
 Name: "{group}\安装与使用说明"; Filename: "{app}\versions\{#Version}\安装说明.txt"
 Name: "{group}\卸载当前版本"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\versions\{#Version}\labwork-preview.exe"; Description: "启动理化检测平台（托盘）"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\versions\{#Version}\labwork-preview.exe"; Description: "启动 labwork（托盘）"; Flags: postinstall nowait skipifsilent unchecked
 
 [Code]
 var SettingsPage: TInputQueryWizardPage;
+
+function HasStableRegistration: Boolean;
+begin
+  Result := RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\LabworkRustPlatform_is1');
+end;
 
 function DataDirectory(Param: String): String;
 begin
@@ -67,11 +81,11 @@ end;
 function DefaultInstallDirectory(Param: String): String;
 var LegacyPath: String;
 begin
-  Result := ExpandConstant('{localappdata}\Programs\理化检测平台');
+  Result := ExpandConstant('{localappdata}\Programs\labwork');
   if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdValue}_is1', 'Inno Setup: App Path', LegacyPath) then
     Result := LegacyPath
   else if FindLegacy(LegacyPath) then
-    Result := ExtractFileDir(LegacyPath) + '\理化检测平台';
+    Result := ExtractFileDir(LegacyPath) + '\labwork';
 end;
 
 procedure InitializeWizard;
@@ -89,7 +103,7 @@ begin
   SettingsPage.Add('数据目录（可选，填写本地绝对路径）：', False);
   SettingsPage.Add('服务器固定私网 IPv4（可选）：', False);
   SettingsPage.Add('内网访问口令（至少12字符，重装需重新输入）：', True);
-  SettingsPage.Values[0] := ExpandConstant('{param:PORT|' + GetPreviousData('Port', '18809') + '}');
+  SettingsPage.Values[0] := ExpandConstant('{param:PORT|' + GetPreviousData('Port', '18810') + '}');
   SettingsPage.Values[1] := ExpandConstant('{param:DATADIR|' + GetPreviousData('DataDirectory', DefaultData) + '}');
   SettingsPage.Values[2] := ExpandConstant('{param:LANIP|' + GetPreviousData('LanIP', '') + '}');
   PasswordFile := ExpandConstant('{param:ACCESSPASSFILE|}');

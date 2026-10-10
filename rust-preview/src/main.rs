@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 mod config;
+mod formula;
 mod months;
 mod auth;
 mod import;
@@ -73,10 +74,14 @@ impl App {
 
     fn book(&self, project:&str,month:&str)->Result<PathBuf,Error> {months::book(&self.home,month,project)}
     fn mapped_methods(&self,code:&str,bytes:&[u8])->Vec<Method> {
-        self.projects.iter().find(|p|p.code==code).map(|p|p.methods.iter().filter(|m|{
-            import::validate_method(bytes,m).is_ok()
-        }).cloned().collect()).unwrap_or_default()
+        let mut legacy:Vec<Method>=self.projects.iter().find(|p|p.code.eq_ignore_ascii_case(code)).map(|p|p.methods.iter().filter(|m|import::validate_method(bytes,m).is_ok()).cloned().collect()).unwrap_or_default();
+        let discovered=workbook::generic_methods(bytes).unwrap_or_default();
+        let mut result=discovered.iter().filter(|m|m.kind=="workbook_formula").cloned().collect::<Vec<_>>();
+        result.append(&mut legacy);
+        result.extend(discovered.into_iter().filter(|m|m.kind=="manual"));
+        result
     }
+
 
 }
 
@@ -102,7 +107,7 @@ async fn catalog(State(state): State<Shared>,headers:HeaderMap) -> Result<Json<V
         let sheets=workbook::sheet_names(&bytes).map_err(error)?;
         let confirmed=rules.get(code).is_some_and(|r|r.len()==sheets.len()&&sheets.iter().all(|s|r.iter().any(|r|&r.sheet==s)));
         monthly_rules.insert(code.to_owned(),if confirmed{rules[code].clone()}else{workbook::discover(&bytes).map_err(error)?});
-        projects.push(json!({"code":code,"name":names.get(code).cloned().unwrap_or_else(||code.into()),"methods":methods,"available":true,"rules_confirmed":confirmed,"sheets":sheets.iter().enumerate().map(|(i,name)|json!({"name":name,"key":format!("s{i}"),"method_key":methods.iter().find(|m|m.sheet.trim()==name.trim()).map(|m|&m.key)})).collect::<Vec<_>>()}));
+        projects.push(json!({"code":code,"name":names.get(code).cloned().unwrap_or_else(||code.into()),"methods":methods,"available":true,"rules_confirmed":confirmed,"sheets":sheets.iter().enumerate().map(|(i,name)|json!({"name":name,"key":format!("s{i}"),"method_key":methods.iter().find(|m|m.sheet.trim()==name.trim()).map(|m|&m.key),"reason":if methods.iter().any(|m|m.sheet.trim()==name.trim()){None}else{workbook::generic_error(&bytes,name)}})).collect::<Vec<_>>()}));
     }
     projects.sort_by(|a,b|a["code"].as_str().cmp(&b["code"].as_str()));
     Ok(Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"lan_url":if app.lan_ip.is_empty(){None}else{Some(format!("http://{}:{}",app.lan_ip,app.port))},"data_directory":app.home.display().to_string(),"projects":projects,"active_month":month,"current_month":months::current(),"months":all_months,"writable":months::writable(&app.home,&month).is_ok(),"month_ready":true,"monthly_rules":monthly_rules})))
@@ -165,7 +170,7 @@ async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):
     let method=app.mapped_methods(&request.project,&bytes).into_iter().find(|m|m.key==request.method).ok_or_else(||error("此表尚无校核的计算方法"))?;
     request.normalize().map_err(error)?;
     if request.entries.iter().any(|r|!r.date.starts_with(&request.month)){return Err(error("检测日期必须属于当前选择月份"));}
-    let outputs=request.entries.iter().enumerate().map(|(i,row)|calc::calculate(&method.kind,&row.measurement,&method.params).map_err(|e|format!("第{}行（{}）：{e}",i+1,row.batch))).collect::<Result<Vec<_>,_>>().map_err(error)?;
+    let outputs=request.entries.iter().enumerate().map(|(i,row)|(if matches!(method.kind.as_str(),"workbook_formula"|"manual"){workbook::generic_calculate(&method,&row.measurement)}else{calc::calculate(&method.kind,&row.measurement,&method.params)}).map_err(|e|format!("第{}行（{}）：{e}",i+1,row.batch))).collect::<Result<Vec<_>,_>>().map_err(error)?;
     let (candidate,rows)=workbook::append(&bytes,&method,&request,&outputs).map_err(error)?;
     let view=workbook::view(&candidate,&method,&rows).map_err(error)?;
     let id=random_id();
@@ -235,8 +240,8 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let port=settings.port;
     let home=settings.data_dir;
     let lan_ip=settings.lan_ip;
-    let access=auth::Access::new(if lan_ip.is_empty(){None}else{Some(&settings.access_password)});
-    let listener=tokio::net::TcpListener::bind((if lan_ip.is_empty(){"127.0.0.1"}else{"0.0.0.0"},port)).await.map_err(|e|format!("理化检测平台启动失败：端口 {port} 无法使用（{e}）。请检查是否已经运行，或修改 labwork.json 中的端口。"))?;
+    let mut access=auth::Access::new(if lan_ip.is_empty(){None}else{Some(&settings.access_password)});
+    let listener=tokio::net::TcpListener::bind((if lan_ip.is_empty(){"127.0.0.1"}else{"0.0.0.0"},port)).await.map_err(|e|format!("labwork 启动失败：端口 {port} 无法使用（{e}）。请检查是否已经运行，或修改 labwork.json 中的端口。"))?;
     let marker=home.join(".labwork-rust-preview");
     if home.exists() && !marker.exists() && fs::read_dir(&home)?.next().is_some() {return Err("拒绝使用已有且未标记的目录；请使用独立预览目录".into());}
     fs::create_dir_all(&home)?;
@@ -252,6 +257,7 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let db=Connection::open(home.join("preview.sqlite3"))?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
+    access.restore(&db)?;
     let (shutdown_tx,shutdown_rx)=tokio::sync::oneshot::channel::<()>();
     #[cfg(windows)]
     let _tray=if tray_mode {Some(tray::start(home.clone(),port,shutdown_tx)?)}else{drop(shutdown_tx);None};
@@ -259,7 +265,7 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     if tray_mode {return Err("托盘模式仅支持Windows".into());}
     let state=Arc::new(Mutex::new(App{home,db,projects:serde_json::from_str(include_str!("../catalog.json"))?,token:random_id(),port,lan_ip,access}));
     let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js)).route("/grid.js",get(grid_js))
-        .route("/login",get(auth::page)).route("/login.js",get(auth::script)).route("/api/login",post(auth::login))
+        .route("/login",get(auth::page)).route("/login.js",get(auth::script)).route("/api/login",post(auth::login)).route("/api/logout",post(auth::logout))
         .route("/api/workbook/{project}/download",get(download_book))
         .route("/api/month",post(choose_month)).route("/api/month-rules/{project}",post(month_rules)).route("/api/book-sheet/{project}/{sheet}",get(raw_sheet))
         .route("/api/workbook/{project}",post(bind_workbook).layer(DefaultBodyLimit::max(import::MAX_BYTES)))

@@ -12,12 +12,17 @@ const fields=()=>[{key:'date',label:'检测日期',unit:''},{key:'batch',label:'
 const emptyRow=()=>({date:LabGrid.labels(rows).at(-1)?.date||today(),batch:LabGrid.labels(rows).at(-1)?.batch||'',notes:''});
 async function responseData(response){if(response.status===401){location.assign('/login');throw Error('请登录后继续');}const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data;}
 async function api(path,body){const response=await fetch(path,{headers:{...(selectedMonth?{'X-Labwork-Month':selectedMonth}:{}),...(body?{'Content-Type':'application/json','X-Labwork-Token':token}:{})},method:body?'POST':'GET',body:body?JSON.stringify(body):undefined});return responseData(response);}
+function showWorkspace(view){if(busy)return;$('entry-view').hidden=view!=='entry';$('management-view').hidden=view!=='manage';for(const [id,value] of [['nav-entry','entry'],['nav-manage','manage']]){$(id).classList.toggle('active',view===value);$(id).setAttribute('aria-pressed',String(view===value));}}
+$('nav-entry').onclick=()=>showWorkspace('entry');$('nav-manage').onclick=()=>showWorkspace('manage');$('manage-shortcut').onclick=()=>showWorkspace('manage');
+$('project-select').onchange=()=>selectProject($('project-select').value);$('sheet-select').onchange=()=>selectSheet($('sheet-select').value);
+$('logout').onclick=async()=>{if(busy)return;try{await api('/api/logout',{});location.assign('/login');}catch(e){message(e.message);}};
+const previewLabel=()=>method?.kind==='manual'?'预览写入':'计算并预览';
 function message(text,success=false){$('message').hidden=false;$('message').textContent=text;$('message').className=success?'success':'';}
-function invalidate(){const hadPreview=previewId;previewId=null;inputVersion++;$('commit').disabled=true;$('download').hidden=true;$('results').hidden=true;$('sheet-status').textContent='输入已更改，请重新预览';if(hadPreview&&baseView)sheet(baseView,true);}
+function invalidate(){const hadPreview=previewId;previewId=null;inputVersion++;$('commit').disabled=true;$('download').hidden=true;$('results').hidden=true;$('sheet-status').textContent='输入已更改，请重新预览';$('action-state').textContent='录入后生成预览';if(hadPreview&&baseView)sheet(baseView,true);}
 function remember(){undo.push(rows.map(r=>({...r})));if(undo.length>30)undo.shift();}
 function refresh(){entry();if(baseView)sheet(baseView,true);markSelection();}
 function changed(next){remember();rows=next;invalidate();refresh();}
-function input(i,key){const numeric=method.fields.some(f=>f.key===key);return `<input data-index="${i}" data-key="${key}" aria-label="第${i+1}行 ${escape(fields().find(f=>f.key===key).label)}" ${numeric?'inputmode="decimal"':''} ${key==='date'?'placeholder="YYYY-MM-DD"':key==='batch'?'maxlength="100"':key==='notes'?'maxlength="2000"':''} autocomplete="off" value="${escape(rows[i][key]||'')}">`;}
+function input(i,key){const numeric=method.fields.some(f=>f.key===key&&f.input_type!=='text');return `<input data-index="${i}" data-key="${key}" aria-label="第${i+1}行 ${escape(fields().find(f=>f.key===key).label)}" ${numeric?'inputmode="decimal"':''} ${key==='date'?'placeholder="YYYY-MM-DD"':key==='batch'?'maxlength="100"':key==='notes'?'maxlength="2000"':''} autocomplete="off" value="${escape(rows[i][key]||'')}">`;}
 function entry(){
   $('entry').innerHTML=`<table><thead><tr><th>测定行</th>${fields().map(f=>`<th>${escape(f.label)}${f.unit?`<small>（${escape(f.unit)}）</small>`:''}</th>`).join('')}</tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${i+1}</td>${keys().map(k=>`<td data-index="${i}" data-key="${k}">${input(i,k)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   $('mobile-entry').innerHTML=rows.map((r,i)=>`<h3>测定行 ${i+1} <button class="quiet mobile-select" data-index="${i}">选择整行</button></h3><div class="group">${fields().map(f=>`<label>${escape(f.label)}${f.unit?`（${escape(f.unit)}）`:''}${input(i,f.key)}</label>`).join('')}</div>`).join('');
@@ -79,10 +84,18 @@ function sheet(view,draft=false){
   $('sheet-tabs').innerHTML=(project.sheets||[]).map(item=>`<button data-sheet="${escape(item.key)}" class="${item.key===selectedSheet?.key?'active':''}">${escape(item.name)}</button>`).join('');$('sheet-tabs').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.sheet));
   $('sheet-note').textContent=`原表至第 ${view.last_row} 行 · 绿色为本次拟追加 · 同组日期/批号仅首行填写`;bindInputs();markSelection();
 }
+function showParameters(){
+  const params=method.params||{};
+  $('parameters').textContent=params.source||(method.kind==='manual'?'手工录入：逐项填写结果，预览后写入工作副本。':method.kind==='workbook_formula'?'按工作簿公式计算；请核对结果后确认写入。':'按已配置检测方法计算；请核对结果后确认写入。');
+  const names={blank:'空白值',c:'标准溶液浓度',factor:'换算系数',mw:'摩尔质量'};
+  const values=Object.entries(params).filter(([key])=>!['source','template_row'].includes(key));
+  $('calculation-details').hidden=!values.length;
+  $('calculation-values').innerHTML=values.map(([key,value])=>{const label=key.startsWith('f:')?`${key.slice(2)} 列公式`:key.startsWith('fixed:')?`固定参数 ${key.slice(6)}`:names[key]||key;return `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`;}).join('');
+}
 function clearView(){
   sheetRequestId++;rawNext=null;$('sheet-pager').hidden=true;
   method=null;baseView=null;rows=[];undo=[];anchor=null;selection=null;invalidate();
-  $('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('parameters').textContent='';
+  $('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('parameters').textContent='';$('calculation-details').hidden=true;
   $('sheet-panel').hidden=true;$('method-choice').hidden=true;document.querySelectorAll('.calc-only').forEach(el=>el.hidden=true);
 }
 async function selectSheet(key,start=1,methodKey){
@@ -93,13 +106,14 @@ async function selectSheet(key,start=1,methodKey){
   const choices=project.methods.filter(item=>item.sheet?.trim()===selectedSheet.name.trim()||item.key===selectedSheet.method_key);
   method=choices.find(item=>item.key===(methodKey||selectedSheet.method_key))||choices[0]||null;
   $('method-choice').hidden=choices.length<2;$('method-select').innerHTML=choices.map(item=>`<option value="${escape(item.key)}" ${item.key===method?.key?'selected':''}>${escape(item.name)}</option>`).join('');
+  $('sheet-select').value=key;$('calculate').textContent=previewLabel();$('action-title').textContent=method?.kind==='manual'?'手工录入与写入':'计算与写入';$('sample').hidden=!method?.fields.some(field=>field.sample);
   $('title').textContent=selectedSheet.name;$('breadcrumb').textContent=`${project.name} / ${code}`;
   document.querySelectorAll('#methods button').forEach(button=>button.classList.toggle('active',button.dataset.key===key));
   const editable=!!method&&writable();
   document.querySelectorAll('.calc-only').forEach(el=>el.hidden=!editable);
   $('browse-note').hidden=editable;
-  $('browse-note').textContent=!writable()?'历史月份只读，可浏览原表。':'原表浏览 · 此工作表尚无已校核计算方法。';
-  if(editable){rows=[{date:today(),batch:'',notes:''}];entry();$('calculate').disabled=false;$('parameters').textContent='计算参数：'+Object.entries(method.params).map(([k,v])=>`${k}=${v}`).join('，');}
+  $('browse-note').textContent=!writable()?'历史月份只读，可浏览原表。':selectedSheet.reason||'此表未识别到可用的计算或手工录入规则。可浏览和下载原表，不会生成未经验证的计算结果。';
+  if(editable){rows=[{date:today(),batch:'',notes:''}];entry();$('calculate').disabled=false;showParameters();}
   try{
     const path=editable?`/api/sheet/${encodeURIComponent(code)}/${encodeURIComponent(method.key)}`:`/api/book-sheet/${encodeURIComponent(code)}/${encodeURIComponent(key)}?start=${start}`;
     const data=await api(path);
@@ -115,10 +129,12 @@ async function selectSheet(key,start=1,methodKey){
 async function selectProject(code,sheetKey){
   if(busy)return;project=catalog.find(item=>item.code===code);selectedSheet=null;clearView();
   document.querySelectorAll('#projects button').forEach(button=>button.classList.toggle('active',button.dataset.code===code));
+  $('project-select').value=project?.code||'';$('rules-project-name').textContent=project?.name||'';
   $('rules-panel').hidden=!project;$('download-workbook').hidden=!project;
   if(project)$('download-workbook').href='/api/workbook/'+encodeURIComponent(project.code)+'/download?month='+encodeURIComponent(selectedMonth);
-  if(!project){$('methods').innerHTML='';$('title').textContent='请导入项目工作簿';$('breadcrumb').textContent='工作簿';$('import-panel').open=true;return;}
+  if(!project){$('methods').innerHTML='';$('title').textContent='请导入项目工作簿';$('breadcrumb').textContent='工作簿';$('import-panel').open=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
   $('methods').innerHTML=(project.sheets||[]).map(item=>`<button data-key="${escape(item.key)}">${escape(item.name)}</button>`).join('');
+  $('sheet-select').innerHTML=project.sheets.map(item=>`<option value="${escape(item.key)}">${escape(item.name)}</option>`).join('');
   $('methods').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.key));
   renderRules();const first=project.sheets.find(item=>item.key===sheetKey)||project.sheets[0];
   if(first)await selectSheet(first.key);else{$('title').textContent=project.name;message('此工作簿没有可显示的工作表。');}
@@ -127,10 +143,10 @@ $('method-select').onchange=()=>{if(selectedSheet)selectSheet(selectedSheet.key,
 $('page-first').onclick=()=>{if(selectedSheet)selectSheet(selectedSheet.key,1);};
 $('page-next').onclick=()=>{if(selectedSheet&&rawNext)selectSheet(selectedSheet.key,rawNext);};
 $('calculate').onclick=async()=>{
-  if(busy||!method||!writable())return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在计算全部批号…';const version=inputVersion;
-  try{const payload={project:project.code,method:method.key,entries:LabGrid.entries(rows,method.fields)},data=await api('/api/preview',payload);if(version!==inputVersion)throw Error('输入已变化，请重新计算');previewId=data.id;sheet(data.view);$('results').innerHTML=data.outputs.map((o,i)=>`<div class="result-card"><small>${escape(data.entries[i].date)} · ${escape(data.entries[i].batch)} · 第 ${i+1} 行</small><strong>${escape(o.display)}</strong><span>${escape(o.unit)}</span></div>`).join('');$('results').hidden=false;$('commit').disabled=false;$('download').href=data.download;$('download').hidden=false;message(`全部 ${data.rows.length} 行已计算，按日期和批号归组写入第 ${data.rows[0]}–${data.rows.at(-1)} 行。请核对绿色预览。`,true);$('sheet-status').textContent='预览已生成，尚未写入';}catch(e){invalidate();message(e.message);}finally{busy=false;$('calculate').disabled=false;$('calculate').textContent='全部批号计算并预览';}
+  if(busy||!method||!writable())return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在生成预览…';$('action-state').textContent='正在生成预览';const version=inputVersion;
+  try{const payload={project:project.code,method:method.key,entries:LabGrid.entries(rows,method.fields)},data=await api('/api/preview',payload);if(version!==inputVersion)throw Error('输入已变化，请重新计算');previewId=data.id;sheet(data.view);$('results').innerHTML=data.outputs.map((o,i)=>`<div class="result-card"><small>${escape(data.entries[i].date)} · ${escape(data.entries[i].batch)} · 第 ${i+1} 行</small><strong>${escape(o.display)}</strong><span>${escape(o.unit)}</span></div>`).join('');$('results').hidden=false;$('commit').disabled=false;$('download').href=data.download;$('download').hidden=false;message(`全部 ${data.rows.length} 行${method.kind==='manual'?'已校验':'已计算'}，预览写入第 ${data.rows[0]}–${data.rows.at(-1)} 行。请核对绿色预览。`,true);$('sheet-status').textContent='预览已生成，尚未写入';$('action-state').textContent='预览已就绪 · 请确认写入';}catch(e){invalidate();message(e.message);}finally{busy=false;$('calculate').disabled=false;$('calculate').textContent=previewLabel();}
 };
-$('commit').onclick=async()=>{if(!previewId||busy||!writable())return;busy=true;writing=true;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=true);$('commit').disabled=true;try{const data=await api(`/api/commit/${previewId}`,{});message(data.message,true);const info=await api(`/api/sheet/${project.code}/${method.key}`);baseView=info.view;nextRow=info.next_row;rows=[emptyRow()];undo=[];selection=null;anchor=null;previewId=null;refresh();$('results').hidden=true;$('download').hidden=true;$('sheet-status').textContent='工作副本写入成功，可录入下一批';}catch(e){message(e.message);$('commit').disabled=false;}finally{busy=false;writing=false;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=false);}};
+$('commit').onclick=async()=>{if(!previewId||busy||!writable())return;busy=true;writing=true;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=true);$('commit').disabled=true;try{const data=await api(`/api/commit/${previewId}`,{});message(data.message,true);const info=await api(`/api/sheet/${project.code}/${method.key}`);baseView=info.view;nextRow=info.next_row;rows=[emptyRow()];undo=[];selection=null;anchor=null;previewId=null;refresh();$('results').hidden=true;$('download').hidden=true;$('sheet-status').textContent='工作副本写入成功，可录入下一批';$('action-state').textContent='已写入 · 可继续录入';}catch(e){message(e.message);$('commit').disabled=false;}finally{busy=false;writing=false;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=false);}};
 function addRows(newBatch=false){if(!method||busy)return;const n=Number($('add-count').value);if(!Number.isInteger(n)||n<1||rows.length+n>LabGrid.maxRows){message('新增行数须为整数，合计最多200行');return;}const seed=LabGrid.labels(rows)[selection?.r1??rows.length-1]||emptyRow();const next=rows.map(r=>({...r})),batch=newBatch?LabGrid.series([seed.batch||''],1,'batch'):seed.batch;for(let i=0;i<n;i++)next.push({date:seed.date||today(),batch:batch===seed.batch&&newBatch?'':batch,notes:'',_requireBatch:newBatch&&i===0});changed(next);select(next.length-n,'batch');$('entry').querySelector(`input[data-index="${next.length-n}"][data-key="batch"]`)?.focus();}
 $('parallel').onclick=()=>addRows(false);$('add-batch').onclick=()=>addRows(true);
 $('remove-row').onclick=()=>{if(!method||busy||!selection)return;if(rows.length-(selection.r1-selection.r0+1)<1){message('至少保留一行测定');return;}const next=LabGrid.remove(rows,selection.r0,selection.r1);selection=null;anchor=null;changed(next);};
@@ -153,6 +169,7 @@ async function loadCatalog(){
   $('instance-info').textContent='版本 '+data.version+' · 端口 '+data.port+' · 数据目录：'+data.data_directory;
   $('lan-info').textContent=data.lan_url?'局域网：'+data.lan_url:'局域网访问未开启';
   $('projects').innerHTML=catalog.map(item=>`<button data-code="${escape(item.code)}" title="${escape(item.name)}"><span class="project-label"><span class="project-name">${escape(item.name)}</span><small>${escape(item.code)}</small></span><span class="project-count">${item.sheets.length} 表</span></button>`).join('')||'<p class="empty-projects">尚无项目，点击“导入项目工作簿”开始。</p>';
+  $('project-select').innerHTML=catalog.map(item=>`<option value="${escape(item.code)}">${escape(item.name)} · ${escape(item.code)}</option>`).join('')||'<option>尚无项目</option>';
   $('projects').querySelectorAll('button').forEach(button=>button.onclick=()=>selectProject(button.dataset.code));
   const months=[...new Set([...(data.months||[]),data.active_month].filter(Boolean))].sort().reverse();
   $('month-select').innerHTML=months.map(month=>`<option value="${escape(month)}" ${month===data.active_month?'selected':''}>${escape(month)}</option>`).join('');
@@ -179,7 +196,7 @@ $('import-form').onsubmit=async event=>{
     await responseData(await fetch('/api/workbook/'+encodeURIComponent(code)+'?name='+encodeURIComponent(name),{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Labwork-Token':token,'X-Labwork-Month':selectedMonth},body:file}));
     await loadCatalog();$('import-form').reset();
   });
-  if(ok){$('import-panel').open=false;await selectProject(code);message('项目已导入，工作表目录已生成。',true);}
+  if(ok){$('import-panel').open=false;await selectProject(code);showWorkspace('entry');message('项目已导入，工作表目录已生成。',true);}
 };
 function renderRules(){
   const stored=project.monthly_rules||catalogInfo.monthly_rules?.[project.code]||[];

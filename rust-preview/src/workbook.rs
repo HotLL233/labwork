@@ -61,8 +61,10 @@ pub fn discover(bytes:&[u8])->Result<Vec<MonthRule>,String>{
         let parameter_end=headers.iter().filter(|(c,_)|**c>batch).find(|(_,v)|["试剂","规格","浓度","系数","mol","M="].iter().any(|word|v.contains(word))).map(|(c,_)|c-1).unwrap_or_else(||headers.keys().copied().max().unwrap_or(batch));
         let end=headers.iter().find(|(c,v)|**c>batch&&v.contains("备注")).map(|(c,_)|*c).unwrap_or(parameter_end).min(parameter_end);
         let example=d.descendants().filter(|n|n.has_tag_name("c")&&n.attribute("r")==Some(format!("{}3",letter(batch)).as_str())).filter_map(|n|cell_value(n,&book.strings).ok()).any(|v|matches!(v.trim(),"例"|"示例"|"举例"));
-        // These are suggestions only: callers must require review before clearing an unfamiliar template.
-        rules.push(MonthRule{sheet:sheet.clone(),data_start_row:if example{4}else{3},clear_columns:(1..=end.min(40)).map(letter).collect()});
+        // Formula dependencies identify data columns even when their top cells hold reagent parameters.
+        let mut clear=(1..=end.min(40)).collect::<std::collections::BTreeSet<_>>();
+        if let Ok(method)=generic_method(&book,sheet,0){for column in method.columns.values(){clear.insert(coord(&format!("{column}1"))?.1);}}
+        rules.push(MonthRule{sheet:sheet.clone(),data_start_row:if example{4}else{3},clear_columns:clear.into_iter().map(letter).collect()});
     }
     Ok(rules)
 }
@@ -76,6 +78,7 @@ pub fn blank_month(bytes:&[u8],rules:&[MonthRule])->Result<Vec<u8>,String>{
         if rule.clear_columns.is_empty(){continue;}
         if rule.sheet.trim()=="目录" {return Err("目录仅用于浏览，不能清空".into());}
         let columns=rule.clear_columns.iter().map(|c|coord(&format!("{c}1")).and_then(|(r,col)|if r==1&&letter(col)==*c{Ok(col)}else{Err("清空列必须使用A、B等大写列名".into())})).collect::<Result<HashSet<_>,String>>()?;
+        if let Ok(method)=generic_method(&book,&rule.sheet,0){for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let (row,col)=coord(reference)?;if row>=rule.data_start_row&&columns.contains(&col){return Err(format!("{}的清空范围包含固定参数{reference}，请调整起始行或列后再确认",rule.sheet));}}}}
         let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
         let data=root.get_mut_child("sheetData").ok_or("缺少工作表数据区")?;
         for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
@@ -278,6 +281,105 @@ fn view_inner(bytes:&[u8],sheet:&str,method:Option<&Method>,highlight:&[u32],pag
     let rows=selected.iter().map(|r|json!({"number":r,"height":heights.get(r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(*r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
     Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"tail_start":tail,"sheet_names":book.order,"start_row":page.unwrap_or(1),"next_row":page.filter(|start|start+199<max_row).map(|start|start+200),"truncated":page.is_some_and(|start|start>1||start+199<max_row)||full_columns>max_col,"columns_truncated":full_columns>max_col}))
 }
+fn expanded_formulas(d:&Document<'_>)->Result<BTreeMap<(u32,u32),String>,String>{
+    let mut masters=BTreeMap::new();let mut formulas=BTreeMap::new();
+    for cell in d.descendants().filter(|n|n.has_tag_name("c")) {
+        if let Some(f)=cell.children().find(|n|n.has_tag_name("f")) {
+            if matches!(f.attribute("t"),Some("array"|"dataTable")){return Err("数组或数据表公式尚未支持".into());}
+            if let Some(text)=f.text().filter(|s|!s.is_empty()) {
+                let position=coord(&attr(cell,"r"))?;
+                if f.attribute("t")==Some("shared"){masters.insert(attr(f,"si"),(position,text.to_owned()));}
+                formulas.insert(position,text.to_owned());
+            }
+        }
+    }
+    for cell in d.descendants().filter(|n|n.has_tag_name("c")) {
+        if let Some(f)=cell.children().find(|n|n.has_tag_name("f")) {
+            if f.text().is_none_or(str::is_empty){
+                let (origin,expression)=masters.get(&attr(f,"si")).ok_or("共享公式缺少主公式")?;let position=coord(&attr(cell,"r"))?;
+                formulas.insert(position,crate::formula::translate(expression,position.0 as i32-origin.0 as i32,position.1 as i32-origin.1 as i32)?);
+            }
+        }
+    }
+    Ok(formulas)
+}
+fn generic_method(book:&Book,sheet:&str,index:usize)->Result<Method,String>{
+    if sheet.trim()=="目录"{return Err("目录仅用于导航".into());}
+    let d=doc(&book.parts[target(book,sheet)?])?;let mut cells=BTreeMap::new();
+    for cell in d.descendants().filter(|n|n.has_tag_name("c")){cells.insert(coord(&attr(cell,"r"))?,cell_value(cell,&book.strings)?);}
+    let value=|row,col|cells.get(&(row,col)).cloned().unwrap_or_default();
+    let date=cells.iter().find(|((r,_),v)|*r<=2&&v.trim()=="日期").map(|((_,c),_)|*c).ok_or("没有识别到日期列，暂只浏览")?;
+    let batch=cells.iter().find(|((r,_),v)|*r==1&&v.contains('批')).map(|((_,c),_)|*c).ok_or("没有识别到批号列，暂只浏览")?;
+    let notes=cells.iter().find(|((r,c),v)|*r==1&&*c>batch&&v.contains("备注")).map(|((_,c),_)|*c);
+    let formulas=expanded_formulas(&d)?;
+    let mut selected=BTreeMap::new();
+    for ((row,col),expression) in &formulas {if *row>=3&&*col>batch{selected.insert(*col,(*row,expression.clone()));}}
+    let template=selected.values().map(|(r,_)|*r).max().unwrap_or(3);
+    let mut params=Values::from([("template_row".into(),template.to_string()),("source".into(),format!("原工作表「{sheet}」最新公式，定位第{template}行；常数保留原式"))]);
+    let mut inputs=std::collections::BTreeSet::new();let mut columns=Values::from([("date".into(),letter(date)),("batch".into(),letter(batch))]);
+    for (column,(row,expression)) in &selected {
+        let mut fixed=std::collections::BTreeSet::new();
+        for reference in crate::formula::references(expression)? {
+            let (r,c)=coord(&reference)?;let absolute_row=reference.trim_end_matches(|c:char|c.is_ascii_digit()).ends_with('$');
+            if absolute_row||(r<4&&r!=*row) {
+                let address=format!("{}{r}",letter(c));let parameter=value(r,c);
+                crate::formula::evaluate(&address,&Values::from([(address.clone(),parameter.clone())])).map_err(|e|format!("固定参数{address}无有效数值：{e}"))?;
+                params.insert(format!("fixed:{address}"),parameter);fixed.insert(address);
+            }else if r==*row {
+                if c<=batch||c==date{return Err("公式引用了日期或批号，不能作为数值计算".into());}
+                if !selected.contains_key(&c){inputs.insert(c);}
+            }else {return Err(format!("公式{column}列引用其他测定行{reference}，需要核定后才能计算"));}
+        }
+        let anchored=crate::formula::anchor(expression,&fixed)?;
+        let expression=crate::formula::translate(&anchored,template as i32-*row as i32,0)?;
+        params.insert(format!("f:{}",letter(*column)),expression);
+        columns.insert(format!("col_{}",letter(*column)),letter(*column));
+    }
+    let is_manual=selected.is_empty();
+    if is_manual {
+        let end=cells.iter().filter(|((r,c),v)|*r==1&&*c>batch&&["试剂","规格","mol","浓度"].iter().any(|s|v.contains(s))).map(|((_,c),_)|*c).min().unwrap_or(16385);
+        for ((r,c),header) in &cells {if *r==1&&*c>batch&&*c<end&&notes.is_none_or(|n|*c<n)&&!header.trim().is_empty(){inputs.insert(*c);}}
+        params.insert("source".into(),format!("原工作表「{sheet}」未含计算公式，按原表登记"));
+    }
+    let mut fields=Vec::new();
+    for c in inputs {
+        let column=letter(c);let key=format!("col_{column}");
+        if params.contains_key(&format!("fixed:{column}{template}")){return Err("同一单元格同时作为固定参数和当前输入，需要核定映射".into());}
+        let label=[value(1,c),value(3,c)].into_iter().find(|v|!v.trim().is_empty()&&v.parse::<bigdecimal::BigDecimal>().is_err()).unwrap_or_else(||format!("{column}列"));
+        let sample=cells.iter().rev().find(|((r,col),v)|*r>=3&&*col==c&&!v.trim().is_empty()&&!formulas.contains_key(&(*r,*col))).map(|(_,v)|v.clone()).unwrap_or_default();
+        let numeric=!is_manual||(!sample.is_empty()&&sample.parse::<bigdecimal::BigDecimal>().is_ok())||["质量","体积","含量","结果","%","ppm","COD","熔点","温度"].iter().any(|word|label.contains(word));
+        fields.push(calc::Field{key:key.clone(),label,unit:value(2,c),sample:if numeric&&sample.parse::<bigdecimal::BigDecimal>().is_err(){"1".into()}else{sample},input_type:if numeric{"number".into()}else{"text".into()}});
+        columns.insert(key,column);
+    }
+    if let Some(notes)=notes.filter(|n|!columns.values().any(|c|c==&letter(*n))){columns.insert("notes".into(),letter(notes));}
+    if is_manual&&fields.is_empty()&&!columns.contains_key("notes"){return Err("未识别到可登记的结果列，暂只浏览".into());}
+    let method=Method{key:format!("sheet_{index}"),name:sheet.trim().to_owned(),kind:if is_manual{"manual".into()}else{"workbook_formula".into()},params,fields,columns,sheet:sheet.to_owned()};
+    // Detect dependency cycles without assuming that the example inputs have valid nonzero denominators.
+    let mut pending=method.params.iter().filter_map(|(k,f)|k.strip_prefix("f:").map(|c|(c.to_owned(),f.clone()))).collect::<BTreeMap<_,_>>();let mut resolved=std::collections::BTreeSet::new();
+    while !pending.is_empty(){let next=pending.iter().find(|(_,f)|crate::formula::references(f).is_ok_and(|refs|refs.iter().all(|r|{let p=coord(r).unwrap();p.0!=template||!pending.contains_key(&letter(p.1))||resolved.contains(&letter(p.1))}))).map(|(c,_)|c.clone()).ok_or("工作表公式存在循环依赖")?;pending.remove(&next);resolved.insert(next);}
+    Ok(method)
+}
+pub fn generic_methods(bytes:&[u8])->Result<Vec<Method>,String>{let book=read(bytes)?;Ok(book.order.iter().enumerate().filter_map(|(i,s)|generic_method(&book,s,i).ok()).collect())}
+pub fn generic_error(bytes:&[u8],sheet:&str)->Option<String>{match read(bytes){Ok(book)=>generic_method(&book,sheet,book.order.iter().position(|s|s==sheet).unwrap_or(0)).err(),Err(e)=>Some(e)}}
+pub fn generic_calculate(method:&Method,raw:&Values)->Result<Values,String>{
+    let template=method.params.get("template_row").and_then(|r|r.parse::<u32>().ok()).ok_or("缺少原公式定位行")?;
+    let mut values=Values::new();let mut output=Values::new();
+    for (key,value) in &method.params {if let Some(reference)=key.strip_prefix("fixed:"){values.insert(reference.into(),value.clone());}}
+    for field in &method.fields {
+        let value=raw.get(&field.key).ok_or_else(||format!("缺少{}",field.label))?;
+        if field.input_type=="text" {if value.chars().count()>2000{return Err(format!("{}最多2000字",field.label));}}
+        else {if value.len()>80{return Err(format!("{}数值过长",field.label));}crate::formula::evaluate("A1",&Values::from([("A1".into(),value.clone())])).map_err(|e|format!("{}：{e}",field.label))?;}
+        output.insert(field.key.clone(),value.clone());
+        values.insert(format!("{}{template}",method.columns[&field.key]),value.clone());
+    }
+    let mut pending=method.params.iter().filter_map(|(k,f)|k.strip_prefix("f:").map(|c|(c.to_owned(),f.clone()))).collect::<BTreeMap<_,_>>();
+    while !pending.is_empty(){
+        let next=pending.iter().find(|(_,f)|crate::formula::references(f).is_ok_and(|refs|refs.iter().all(|r|values.contains_key(&r.replace('$',""))))).map(|(c,f)|(c.clone(),f.clone())).ok_or("公式存在循环依赖或缺少引用数值")?;
+        let value=crate::formula::evaluate(&next.1,&values)?;values.insert(format!("{}{template}",next.0),value.clone());output.insert(format!("col_{}",next.0),value);pending.remove(&next.0);
+    }
+    let result=method.params.keys().filter_map(|k|k.strip_prefix("f:")).filter_map(|c|output.get(&format!("col_{c}")).map(|v|(c,v))).map(|(c,v)|{let n=v.parse::<bigdecimal::BigDecimal>().unwrap();format!("{c}: {}",n.with_scale_round(5,bigdecimal::RoundingMode::HalfEven))}).collect::<Vec<_>>().join("；");
+    output.insert("display".into(),if result.is_empty(){"已登记".into()}else{result});output.insert("unit".into(),String::new());Ok(output)
+}
 fn el(name:&str)->Element{let mut e=Element::new(name);e.namespace=Some(MAIN.into());e}
 fn value_cell(reference:String,style:Option<String>,value:String,text:bool,formula:Option<&String>)->Element{
     let mut cell=el("c");cell.attributes.insert("r".into(),reference);if let Some(style)=style{cell.attributes.insert("s".into(),style);}
@@ -290,10 +392,22 @@ fn last_data_row(book:&Book,method:&Method)->Result<u32,String>{
     for cell in d.descendants().filter(|n|n.has_tag_name("c")){
         let reference=attr(cell,"r");let (r,_)=coord(&reference)?;
         let col=reference.trim_end_matches(|c:char|c.is_ascii_digit());
-        if r>=4&&!cell_value(cell,&book.strings)?.is_empty()&&method.columns.iter().any(|(key,c)|key!="date"&&key!="notes"&&c==col){last=last.max(r);}
+        if r>=4&&!cell_value(cell,&book.strings)?.is_empty()&&method.columns.iter().any(|(key,c)|key!="date"&&(key!="notes"||method.kind=="manual")&&c==col){last=last.max(r);}
     }Ok(last)
 }
-pub fn next_row(bytes:&[u8],method:&Method)->Result<u32,String>{Ok(last_data_row(&read(bytes)?,method)?+1)}
+fn append_start(book:&Book,method:&Method,count:u32)->Result<u32,String>{
+    let mut start=last_data_row(book,method)?+1;let d=doc(&book.parts[target(book,&method.sheet)?])?;
+    let columns=method.columns.values().map(|c|coord(&format!("{c}1")).map(|(_,c)|c)).collect::<Result<HashSet<_>,_>>()?;
+    let mut ranges=d.descendants().filter(|n|n.has_tag_name("mergeCell")).map(|n|merge_bounds(&attr(n,"ref"))).collect::<Result<Vec<_>,_>>()?;
+    ranges.sort_by_key(|(a,_)|a.0);
+    if count==0||count>200{return Err("每次支持1至200行测定".into());}
+    for (a,b) in ranges {
+        if a.0>start+count-1{break;}
+        if b.0>=start&&columns.iter().any(|c|*c>=a.1&&*c<=b.1){start=b.0+1;}
+    }
+    if start+count-1>1048576{return Err("没有足够的连续空行，记录区已满".into());}Ok(start)
+}
+pub fn next_row(bytes:&[u8],method:&Method)->Result<u32,String>{append_start(&read(bytes)?,method,1)}
 pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Result<(Vec<u8>,Vec<u32>),String>{
     let book=read(bytes)?;let path=target(&book,&method.sheet)?.clone();let d=doc(&book.parts[&path])?;
     let last=last_data_row(&book,method)?;let mut source_styles=BTreeMap::new();let mut values=BTreeMap::new();
@@ -301,6 +415,9 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         let reference=attr(cell,"r");let (r,_)=coord(&reference)?;let col=reference.trim_end_matches(|c:char|c.is_ascii_digit()).to_owned();let value=cell_value(cell,&book.strings)?;
         values.insert(reference.clone(),value);
         if r==3{source_styles.insert(col,attr(cell,"s"));}
+    }
+    if let Some(template)=method.params.get("template_row").and_then(|r|r.parse::<u32>().ok()) {
+        for cell in d.descendants().filter(|n|n.has_tag_name("c")) {let reference=attr(cell,"r");if coord(&reference)?.0==template {let style=attr(cell,"s");if !style.is_empty(){source_styles.insert(reference.trim_end_matches(|c:char|c.is_ascii_digit()).into(),style);}}}
     }
     if request.entries.len()!=outputs.len()||outputs.is_empty(){return Err("计算行数不一致".into());}
     let (hidden,_,mut groups)=historical_labels(&d,&book,method)?;
@@ -321,15 +438,17 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
             let mut xml=Vec::new();styles_xml.write(&mut xml).map_err(|_|"生成日期样式失败")?;replacements.insert("xl/styles.xml".to_owned(),xml);
         }
     }
-    if !values.get("B1").is_some_and(|s|s.contains('批')){return Err("表头不匹配，不能写入".into());}
+    if !values.get(&format!("{}1",method.columns["batch"])).is_some_and(|s|s.contains('批')){return Err("表头不匹配，不能写入".into());}
     for (key,col) in &method.columns{
         if method.kind!="water_diluted"&&calc::keys(&method.kind).contains(&key.as_str())&&key!="result"&&values.get(&format!("{col}1")).is_none_or(String::is_empty){return Err("输入列缺少表头，需要核定映射".into());}
     }
-    let rows=(last+1..last+1+outputs.len()as u32).collect::<Vec<_>>();if rows.iter().any(|r|*r>1048576){return Err("记录区已满".into());}
-    for ref_value in values.keys(){let (r,_)=coord(ref_value)?;if rows.contains(&r)&&!values[ref_value].is_empty(){return Err("待写入行已占用".into());}}
+    let start=append_start(&book,method,outputs.len()as u32)?;
+    let rows=(start..start+outputs.len()as u32).collect::<Vec<_>>();
+    let mapped=method.columns.values().map(|c|coord(&format!("{c}1")).map(|(_,c)|c)).collect::<Result<HashSet<_>,_>>()?;
+    for ref_value in values.keys(){let (r,c)=coord(ref_value)?;if rows.contains(&r)&&mapped.contains(&c)&&!values[ref_value].is_empty(){return Err("待写入行已占用".into());}}
     for merged in d.descendants().filter(|n|n.has_tag_name("mergeCell")){
         let (a,b)=merge_bounds(&attr(merged,"ref"))?;
-        if rows.iter().any(|r|*r>=a.0&&*r<=b.0){return Err("待写入行涉及合并单元格，请核定映射".into());}
+        if rows.iter().any(|r|*r>=a.0&&*r<=b.0)&&mapped.iter().any(|c|*c>=a.1&&*c<=b.1){return Err("待写入行涉及合并单元格，请核定映射".into());}
     }
     let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
     let data=root.get_mut_child("sheetData").ok_or("缺少记录区")?;
@@ -363,11 +482,16 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         let batch_value=if repeated.1 {String::new()}else{entry.batch.clone()};
         expected_labels.push((date_value.clone(),batch_value.clone()));
         raw.extend(Values::from([("date".into(),date_value),("batch".into(),batch_value),("notes".into(),entry.notes.clone())]));
-        let formulas=calc::formulas(&method.kind,&method.columns,*row_no,&method.params);
-        data.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="row"&&e.attributes.get("r")==Some(&row_no.to_string())));
-        let mut row=el("row");row.attributes.insert("r".into(),row_no.to_string());
+        let formulas=if method.kind=="workbook_formula" {
+            let template=method.params.get("template_row").and_then(|r|r.parse::<i32>().ok()).ok_or("缺少原公式定位行")?;
+            method.params.iter().filter_map(|(k,f)|k.strip_prefix("f:").map(|c|(c,f))).map(|(c,f)|Ok((format!("col_{c}"),crate::formula::translate(f,*row_no as i32-template,0)?))).collect::<Result<BTreeMap<_,_>,String>>()?
+        }else{calc::formulas(&method.kind,&method.columns,*row_no,&method.params)};
+        let old=data.children.iter().position(|n|matches!(n,XMLNode::Element(e)if e.name=="row"&&e.attributes.get("r")==Some(&row_no.to_string())));
+        let mut row=if let Some(position)=old{match data.children.remove(position){XMLNode::Element(row)=>row,_=>unreachable!()}}else{el("row")};row.attributes.insert("r".into(),row_no.to_string());
+        row.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="c"&&e.attributes.get("r").and_then(|r|coord(r).ok()).is_some_and(|(_,c)|mapped.contains(&c))));
         let mut cols=method.columns.iter().collect::<Vec<_>>();cols.sort_by_key(|(_,col)|(col.len(),col.as_str()));
-        for (key,col) in cols{if let Some(value)=raw.get(key){row.children.push(XMLNode::Element(value_cell(format!("{col}{row_no}"),source_styles.get(col).filter(|s|!s.is_empty()).cloned(),value.clone(),key=="batch"||key=="notes",formulas.get(key))));}}
+        for (key,col) in cols{if let Some(value)=raw.get(key){let text=key=="batch"||key=="notes"||method.fields.iter().any(|f|f.key==*key&&f.input_type=="text");row.children.push(XMLNode::Element(value_cell(format!("{col}{row_no}"),source_styles.get(col).filter(|s|!s.is_empty()).cloned(),value.clone(),text,formulas.get(key))));}}
+        row.children.sort_by_key(|n|match n{XMLNode::Element(c)if c.name=="c"=>c.attributes.get("r").and_then(|r|coord(r).ok()).map(|(_,c)|c).unwrap_or(0),_=>0});
         data.children.push(XMLNode::Element(row));
     }
     data.children.sort_by_key(|n|match n{XMLNode::Element(e)if e.name=="row"=>e.attributes.get("r").and_then(|s|s.parse::<u32>().ok()).unwrap_or(0),_=>0});
@@ -399,6 +523,47 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires LABWORK_INVENTORY pointing to original workbooks"]
+    fn original_generic_methods_roundtrip(){
+        let inventory:Value=serde_json::from_slice(&std::fs::read(std::env::var("LABWORK_INVENTORY").unwrap()).unwrap()).unwrap();
+        let mut total=0;let mut report=Vec::new();let mut sheet_total=0;
+        for item in inventory.as_array().unwrap(){
+            let path=item["Path"].as_str().unwrap();let source=std::fs::read(path).unwrap();let book=read(&source).unwrap();let methods=generic_methods(&source).unwrap();
+            sheet_total+=book.order.len();
+            let unsupported=book.order.iter().filter(|s|s.trim()!="目录"&&!methods.iter().any(|m|m.sheet==**s)).map(|s|json!({"sheet":s,"reason":generic_error(&source,s)})).collect::<Vec<_>>();
+            report.push(json!({"project":item["Name"].as_str().unwrap().split('-').next().unwrap(),"sheets":book.order.len(),"supported_methods":methods.len(),"formula_methods":methods.iter().filter(|m|m.kind=="workbook_formula").count(),"manual_methods":methods.iter().filter(|m|m.kind=="manual").count(),"read_only_sheets":unsupported,"original_unchanged":true}));
+            println!("{}: {} methods",item["Name"],methods.len());
+            for sheet in &book.order {if sheet.trim()!="目录"&&!methods.iter().any(|m|m.sheet==*sheet){println!("  unsupported {sheet}: {:?}",generic_error(&source,sheet));}}
+            for method in methods {
+                let raw=method.fields.iter().map(|f|(f.key.clone(),if f.input_type=="text"{"测试".into()}else{"1".into()})).collect::<Values>();
+                let outputs=generic_calculate(&method,&raw).unwrap_or_else(|e|panic!("{} / {}: {e}",item["Name"],method.sheet));
+                let request:Request=serde_json::from_value(json!({"project":"TEST","method":method.key,"entries":[{"date":"2026-10-10","batch":"GENERIC-TEST","measurement":raw}]})).unwrap();
+                let (candidate,rows)=append(&source,&method,&request,&[outputs.clone()]).unwrap_or_else(|e|panic!("{} / {} append: {e}",item["Name"],method.sheet));
+                let candidate=read(&candidate).unwrap();let path=target(&candidate,&method.sheet).unwrap();let doc=doc(&candidate.parts[path]).unwrap();
+                for (key,value) in &outputs {if let Some(col)=method.columns.get(key){let reference=format!("{col}{}",rows[0]);let cell=doc.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(&reference)).unwrap();assert_eq!(cell_value(cell,&candidate.strings).unwrap(),*value);}}
+                total+=1;
+            }
+            if item["Name"].as_str().unwrap().starts_with("K001-") {
+                let rules=discover(&source).unwrap();let rule=rules.iter().find(|r|r.sheet.trim()=="硫酸根").unwrap();
+                assert!(rule.clear_columns.contains(&"H".into())&&rule.clear_columns.contains(&"I".into()));assert_eq!(rule.data_start_row,4);
+                let candidate=blank_month(&source,&rules).unwrap();let blank=read(&candidate).unwrap();
+                let source_sheet=doc(&book.parts[target(&book,&rule.sheet).unwrap()]).unwrap();let blank_sheet=doc(&blank.parts[target(&blank,&rule.sheet).unwrap()]).unwrap();
+                let after=blank_sheet.descendants().filter(|n|n.has_tag_name("c")).map(|n|(attr(n,"r"),n)).collect::<BTreeMap<_,_>>();
+                for cell in source_sheet.descendants().filter(|n|n.has_tag_name("c")) {
+                    let reference=attr(cell,"r");let (row,col)=coord(&reference).unwrap();
+                    if (col==8||col==9)&&row>=4{assert!(cell_value(after[&reference],&blank.strings).unwrap().is_empty());}
+                    if reference=="I1"||reference=="I2"{assert_eq!(cell_value(cell,&book.strings).unwrap(),cell_value(after[&reference],&blank.strings).unwrap());}
+                }
+                let inherited=generic_methods(&candidate).unwrap();let method=inherited.iter().find(|m|m.sheet.trim()=="硫酸根").unwrap();
+                let raw=method.fields.iter().map(|f|(f.key.clone(),"1".into())).collect();assert!(generic_calculate(method,&raw).is_ok());
+            }
+            assert_eq!(std::fs::read(path).unwrap(),source);
+        }
+        assert!(total>100);println!("generic calculation/write roundtrip methods: {total}");
+        let report=json!({"version":env!("CARGO_PKG_VERSION"),"workbooks":report,"total_sheets":sheet_total,"calculation_and_write_roundtrips":total,"source_files_unchanged":true,"candidate_results_readback_verified":true,"month_formula_inputs_cleared_fixed_headers_preserved":true});
+        std::fs::write(Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime/generic-workbook-regression.json"),serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
     #[test]
     #[ignore = "requires LABWORK_INVENTORY pointing to the read-only local workbook inventory"]
     fn original_workbooks_discovery_and_month_templates() {
@@ -439,7 +604,7 @@ mod tests {
         let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
         let sheet=format!(r#"<worksheet xmlns="{MAIN}"><sheetData>
           <row r="1"><c r="B1" t="inlineStr"><is><t>批号</t></is></c><c r="C1" t="inlineStr"><is><t>质量</t></is></c><c r="D1" t="inlineStr"><is><t>体积</t></is></c></row>
-          <row r="2"><c r="F2"><v>35.45</v></c></row>
+          <row r="2"><c r="A2" t="inlineStr"><is><t>日期</t></is></c><c r="F2"><v>35.45</v></c></row>
           <row r="3"><c r="A3" s="0"/></row>
           <row r="4"><c r="A4"><v>46303</v></c><c r="B4" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C4"><v>1</v></c><c r="F4"><v>0.1032</v></c></row>
           <row r="5"><c r="A5"><v>20261008</v></c><c r="B5" t="inlineStr"><is><t>LOT-1</t></is></c><c r="C5"><v>2</v></c></row>
@@ -449,7 +614,8 @@ mod tests {
           <row r="9"><c r="B9" t="str"><f>B6</f><v>LOT-1</v></c></row>
           <row r="10"><c r="A10"><v>46304</v></c></row>
           <row r="24"><c r="C24"><v>4</v></c><c r="E24"><f>C24*2</f><v>8</v></c></row>
-        </sheetData><mergeCells count="1"><mergeCell ref="A10:A11"/></mergeCells></worksheet>"#);
+          <row r="25" ht="30"><c r="J25"><v>99</v></c></row>
+        </sheetData><mergeCells count="2"><mergeCell ref="A10:A11"/><mergeCell ref="J25:K25"/></mergeCells></worksheet>"#);
         for (name,xml) in [
             ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="目录" sheetId="2" r:id="rId2"/><sheet name="{}" sheetId="1" r:id="rId1"/></sheets></workbook>"#,method.sheet)),
             ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.into()),
@@ -475,11 +641,13 @@ mod tests {
         assert_eq!(cell_value(cell("A26"),&book.strings).unwrap(),"46305");
         for (reference,formula) in [("A8","A6"),("B9","B6"),("E24","C24*2")] {assert_eq!(cell(reference).children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));}
         assert_eq!(cell_value(cell("C5"),&book.strings).unwrap(),"2");
+        assert_eq!(cell_value(cell("J25"),&book.strings).unwrap(),"99");
+        assert_eq!(cell("J25").parent().unwrap().attribute("ht"),Some("30"));
         assert!(d.descendants().any(|n|n.has_tag_name("mergeCell")&&n.attribute("ref")==Some("A10:A11")));
         let source_book=read(&source).unwrap();let source_doc=doc(&source_book.parts["xl/worksheets/sheet1.xml"]).unwrap();
         assert_eq!(cell_value(source_doc.descendants().find(|n|n.attribute("r")==Some("A5")).unwrap(),&source_book.strings).unwrap(),"20261008");
         assert_eq!(sheet_names(&source).unwrap(),vec!["目录".to_owned(),method.sheet.clone()]);
-        let raw=raw_view(&source,&method.sheet,1).unwrap();assert_eq!(raw["rows"].as_array().unwrap().len(),24);
+        let raw=raw_view(&source,&method.sheet,1).unwrap();assert_eq!(raw["rows"].as_array().unwrap().len(),25);
         assert!(!raw["truncated"].as_bool().unwrap());
         let page=raw_view(&source,&method.sheet,20).unwrap();assert_eq!(page["rows"][0]["number"],20);assert_eq!(page["truncated"],true);
         assert!(raw_view(&source,&method.sheet,0).is_err());

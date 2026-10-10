@@ -2,13 +2,13 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const elements=new Map(),requests=[];
-function element(id){if(!elements.has(id))elements.set(id,{value:'',files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
+function element(id){if(!elements.has(id))elements.set(id,{value:'',setAttribute(){},files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
 const project={code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',sheet:'水分',fields:[],params:{},columns:{}},{key:'water_diluted',name:'稀释水分',sheet:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
-let active='2026-10',writable=true,missingOnce=false;
+let active='2026-10',writable=true,missingOnce=false,redirect;
 const context=vm.createContext({
   console,Date,sessionStorage:{getItem(){return '2026-10';},setItem(){},removeItem(){}},
   document:{getElementById:element,querySelector(){return{content:'test-token'};},querySelectorAll(){return[];}},
-  location:{assign(){throw Error('unexpected redirect');}},
+  location:{assign(path){redirect=path;}},
   fetch:async(path,options)=>{requests.push({path,...options});let data;
     if(path==='/api/catalog'&&missingOnce){missingOnce=false;return{ok:false,status:400,json:async()=>({error:'月份不存在，请刷新目录'})};}
     if(path==='/api/catalog')data={projects:[project],active_month:active,months:['2026-09','2026-10'],current_month:'2026-10',writable,monthly_rules:{},version:'test',port:18807};
@@ -58,6 +58,24 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   assert.equal(element('browse-note').hidden,true);
   missingOnce=true;await vm.runInContext('loadCatalog()',context);
   assert.equal(requests.filter(request=>request.path==='/api/catalog').at(-1).headers['X-Labwork-Month'],undefined);
+  vm.runInContext("showWorkspace('manage')",context);
+  assert.equal(element('entry-view').hidden,true);assert.equal(element('management-view').hidden,false);
+  vm.runInContext("showWorkspace('entry')",context);
+  assert.equal(element('entry-view').hidden,false);assert.equal(element('management-view').hidden,true);
+  project.methods.push({key:'manual',kind:'manual',name:'手工结果',sheet:'原始表',fields:[{key:'appearance',label:'外观',input_type:'text'}],params:{},columns:{}});
+  await vm.runInContext("selectSheet('s0',1,'manual')",context);
+  assert.equal(element('calculate').textContent,'预览写入');
+  vm.runInContext("method.params={source:'按原表第7行公式',template_row:'7','f:E':'C7/D7','fixed:B2':'0.1'};showParameters()",context);
+  assert.equal(element('parameters').textContent,'按原表第7行公式');
+  assert(element('calculation-values').innerHTML.includes('固定参数 B2'));
+  assert(!element('calculation-values').innerHTML.includes('template_row'));
+  assert(!element('calculation-values').innerHTML.includes('f:E'));
+  assert.equal(element('action-title').textContent,'手工录入与写入');
+  assert(!vm.runInContext("input(0,'appearance')",context).includes('inputmode="decimal"'));
+  assert.equal(element('sheet-select').value,'s0');
+  await element('logout').onclick();
+  assert.equal(requests.at(-1).path,'/api/logout');
+  assert.equal(requests.at(-1).headers['X-Labwork-Token'],'test-token');assert.equal(redirect,'/login');
   await vm.runInContext('selectProject(undefined)',context);
   assert.equal(element('import-panel').open,true);
   console.log('dynamic sheets, calculation gating, per-browser month and readonly passed');

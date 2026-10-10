@@ -41,7 +41,7 @@ pub fn load() -> Result<Settings, Box<dyn std::error::Error>> {
         let mut settings:Settings=serde_json::from_str(text.trim_start_matches('\u{feff}'))?;
         if settings.data_dir.is_relative() {settings.data_dir=config.parent().unwrap_or(&base).join(&settings.data_dir);}
         settings
-    } else {Settings{port:18809,data_dir:base.join("data"),lan_ip:String::new(),access_password:String::new()}};
+    } else {Settings{port:18810,data_dir:base.join("data"),lan_ip:String::new(),access_password:String::new()}};
     if let Some(home)=home {settings.data_dir=home;}
     if let Some(port)=port {settings.port=port;}
     if settings.port<1024 {return Err("端口必须是1024至65535的整数".into());}

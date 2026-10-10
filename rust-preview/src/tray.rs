@@ -8,7 +8,7 @@ const STOP: usize = 3;
 fn wide(text: &str) -> Vec<u16> { text.encode_utf16().chain(Some(0)).collect() }
 
 pub fn show_error(message: &str) {
-    unsafe { MessageBoxW(null_mut(), wide(message).as_ptr(), wide("理化检测平台").as_ptr(), MB_OK | MB_ICONERROR); }
+    unsafe { MessageBoxW(null_mut(), wide(message).as_ptr(), wide("labwork").as_ptr(), MB_OK | MB_ICONERROR); }
 }
 
 
@@ -142,7 +142,7 @@ pub fn start(home: PathBuf, port: u16, shutdown: tokio::sync::oneshot::Sender<()
             let _ = sender.send(Err(format!("无法加载平台托盘图标：{}", std::io::Error::last_os_error())));
             DestroyWindow(window); UnregisterClassW(class_name.as_ptr(), instance); return;
         }
-        let tip = wide(&format!("理化检测平台 {} · 127.0.0.1:{port}", env!("CARGO_PKG_VERSION")));
+        let tip = wide(&format!("labwork {} · 127.0.0.1:{port}", env!("CARGO_PKG_VERSION")));
         for (target, source) in state.icon.szTip.iter_mut().take(127).zip(tip) { *target = source; }
         SetWindowLongPtrW(window, GWLP_USERDATA, (&mut *state as *mut State) as isize);
         if Shell_NotifyIconW(NIM_ADD, &state.icon) == 0 {

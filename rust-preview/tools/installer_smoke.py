@@ -9,7 +9,7 @@ parser.add_argument('--installer',type=Path)
 parser.add_argument('--app-id',default='LabworkRustPlatform')
 parser.add_argument('--report-dir',type=Path)
 args=parser.parse_args()
-installer=args.installer or Path('C:/labwork/releases')/f'v{version}/installer'/f'理化检测平台-{version}-Windows-x64-安装包.exe'
+installer=args.installer or Path('C:/labwork/releases')/f'v{version}/installer'/f'labwork-{version}-Windows-x64-Setup.exe'
 if args.app_id!='LabworkRustPlatform':
     assert args.app_id.startswith('LabworkRustPlatform-QA-') and args.app_id in installer.stem,'QA installer filename must identify its isolated AppId'
 key=fr'Software\Microsoft\Windows\CurrentVersion\Uninstall\{args.app_id}_is1'
@@ -31,6 +31,8 @@ install_root=test/'installed';app=install_root/'versions'/version;data=test/'外
 with socket.socket() as probe:
     probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
 def run(exe,*args):
+    if Path(exe)==installer and not any(arg.upper().startswith('/GROUP=') for arg in args):
+        args=(*args,f'/GROUP=Labwork installer test {test.name}')
     return subprocess.run([str(exe),'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',*args],timeout=90).returncode
 code=run(installer,f'/DIR={install_root}',f'/PORT={port}',f'/DATADIR={data}',f'/GROUP=Labwork installer test {test.name}',f'/LOG={test / "install.log"}')
 assert code==0,code
@@ -40,7 +42,7 @@ assert config=={'port':port,'data_dir':str(data),'lan_ip':'','access_password':'
 assert (data/'.labwork-rust-preview').is_file() and (data/'workbooks').is_dir()
 assert not list(app.glob('*.cmd'))
 assert (app/'labwork.ico').is_file()
-older=install_root/'versions'/'0.0.2-alpha.1-grid.5';older.mkdir()
+older=install_root/'versions'/'0.0.2-alpha.1-grid.6';older.mkdir()
 (older/'retain.exe').write_bytes(b'previous version sentinel')
 assert run(installer,f'/DIR={install_root}',f'/LOG={test / "reinstall.log"}')==0
 assert (older/'retain.exe').read_bytes()==b'previous version sentinel'

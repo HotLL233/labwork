@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, str::FromStr};
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Field { pub key:String, pub label:String, pub unit:String, pub sample:String }
+pub struct Field { pub key:String, pub label:String, pub unit:String, pub sample:String, #[serde(default)] pub input_type:String }
 pub type Values = BTreeMap<String,String>;
 fn n(raw:&Values,key:&str)->Result<D,String> {
     let s=raw.get(key).ok_or_else(||format!("缺少 {key}"))?;

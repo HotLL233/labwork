@@ -55,7 +55,8 @@ pub fn name_project(home:&FsPath,code:&str,name:&str)->Result<(),Error> {
     let mut values=names(home)?;values.insert(code.into(),if name.trim().is_empty(){code.into()}else{name.trim().into()});save_json(&home.join("project-names.json"),&values)
 }
 pub fn saved_rules(home:&FsPath)->Result<BTreeMap<String,Vec<MonthRule>>,Error> {
-    let p=home.join("month-rules.json");if !p.exists(){return Ok(BTreeMap::new());}serde_json::from_slice(&fs::read(p).map_err(error)?).map_err(error)
+    // Grid 7 discovers additional formula input columns; old confirmations must be reviewed again.
+    let p=home.join("month-rules-v2.json");if !p.exists(){return Ok(BTreeMap::new());}serde_json::from_slice(&fs::read(p).map_err(error)?).map_err(error)
 }
 pub fn set_rules(home:&FsPath,month:&str,code:&str,rules:Vec<MonthRule>)->Result<(),Error> {
     writable(home,month)?;
@@ -63,7 +64,25 @@ pub fn set_rules(home:&FsPath,month:&str,code:&str,rules:Vec<MonthRule>)->Result
     let sheets=workbook::sheet_names(&bytes).map_err(error)?;
     if rules.len()!=sheets.len() || sheets.iter().any(|s|rules.iter().filter(|r|&r.sheet==s).count()!=1) {return Err(error("请为每张工作表确认清空范围；参数表可不选任何列"));}
     workbook::blank_month(&bytes,&rules).map_err(error)?;
-    let mut values=saved_rules(home)?;values.insert(code.into(),rules);save_json(&home.join("month-rules.json"),&values)
+    let mut values=saved_rules(home)?;values.insert(code.into(),rules);save_json(&home.join("month-rules-v2.json"),&values)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_month_rules_require_reconfirmation_without_modifying_rollback_file(){
+        let home=std::env::temp_dir().join(format!("labwork-month-rules-{}",random_id()));
+        fs::create_dir_all(home.join("months/2026-10/workbooks")).unwrap();
+        fs::write(home.join("months/2026-10/workbooks/D006.xlsx"),b"not read until rules are confirmed").unwrap();
+        let old=br#"{"D006":[{"sheet":"sheet","start_row":4,"columns":["A","B"]}]}"#;
+        fs::write(home.join("month-rules.json"),old).unwrap();
+        assert!(saved_rules(&home).unwrap().is_empty());
+        let failure=create(&home,"2026-11").unwrap_err();assert!(failure.1.0["error"].as_str().unwrap().contains("确认"));
+        assert!(!home.join("months/2026-11").exists());
+        assert_eq!(fs::read(home.join("month-rules.json")).unwrap(),old);
+        fs::write(home.join("month-rules-v2.json"),old).unwrap();assert!(saved_rules(&home).unwrap().contains_key("D006"));
+        fs::remove_dir_all(home).unwrap();
+    }
 }
 pub fn create(home:&FsPath,month:&str)->Result<(),Error> {
     if !valid(month){return Err(error("月份格式须为YYYY-MM"));}
