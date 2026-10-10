@@ -2,6 +2,11 @@
 #ifndef AppIdValue
   #define AppIdValue "LabworkRustPlatform"
 #endif
+#if AppIdValue == "LabworkRustPlatform"
+  #define DesktopName "labwork"
+#else
+  #define DesktopName AppIdValue
+#endif
 [Setup]
 AppId={#AppIdValue}
 AppName=labwork
@@ -14,8 +19,8 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-OutputDir=..\..\..\..\releases\v{#Version}\installer
-OutputBaseFilename=labwork-{#Version}-Windows-x64-Setup
+OutputDir=..\..\..\..\releases\v{#Version}\installer-r1
+OutputBaseFilename=labwork-{#Version}-Windows-x64-Setup-installer-r1
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -48,6 +53,7 @@ Type: files; Name: "{userprograms}\理化检测平台\卸载当前版本.lnk"; C
 #endif
 
 [Icons]
+Name: "{userdesktop}\{#DesktopName}"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "启动 labwork，托盘双击打开页面"
 Name: "{group}\启动 labwork（托盘）"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "托盘双击打开页面，右键正常停止"
 Name: "{group}\数据与月份目录"; Filename: "{code:DataDirectory}"
 Name: "{group}\安装与使用说明"; Filename: "{app}\versions\{#Version}\安装说明.txt"
