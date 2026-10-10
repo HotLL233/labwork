@@ -1,6 +1,8 @@
 """Exercise XLSX formatting through an isolated HTTP server, never user files."""
 import argparse
 import copy
+import ctypes
+from ctypes import wintypes
 import hashlib
 import io
 import json
@@ -85,8 +87,21 @@ def run(exe):
             view=ok('/api/book-sheet/FORMATQA/s0',month=month)
             original_hash=view['fingerprint'];assert original_hash==hashlib.sha256(source).hexdigest()
             payload={'sheet':'格式测试','range':'C3:D3','number_format':'0.00','font_name':'Arial','font_size':14,'bold':True,'font_color':'#112233','fill_color':'#FFFF00','alignment':'center','column_width':18,'row_height':28,'fingerprint':original_hash}
+            assert api('/api/workbook/FORMATQA/format',payload,month)[0]==409
+            assert target.read_bytes()==source
+            mirror_before=source
+            linked=folder/'FORMATQA-理化'/month[:4]/month.replace('-','.')/('FORMATQA-理化-'+month.replace('-','')+'.xlsx')
+            output=io.BytesIO()
+            with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:
+                for name,data in parts(source).items():
+                    archive.writestr(name,data.replace(b'QA-001',b'SOURCE-ONLY') if name=='xl/worksheets/sheet1.xml' else data)
+            source=output.getvalue()
+            linked.parent.mkdir(parents=True);linked.write_bytes(source)
+            ok('/api/workbook/FORMATQA/source',{'path':str(linked)},month)
+            payload['fingerprint']=ok('/api/book-sheet/FORMATQA/s0',month=month)['fingerprint']
             saved=ok('/api/workbook/FORMATQA/format',payload,month)
             changed=target.read_bytes()
+            assert linked.read_bytes()==changed,'Formatting missing from associated original'
             assert saved['fingerprint']==hashlib.sha256(changed).hexdigest()!=original_hash
             assert Path(saved['workbook_path'])==target and saved['view']
             assert contents(changed)==contents(source),'formatting changed cell values or formulas'
@@ -105,12 +120,30 @@ def run(exe):
             assert float(tree.find('.//s:row[@r="3"]',NS).attrib['ht'])==28
             assert ok('/api/book-sheet/FORMATQA/s0',month=month)['fingerprint']==saved['fingerprint']
             assert ok('/api/workbook/FORMATQA/download?month='+month)==changed
-            backups=list((home/'backups').glob('FORMATQA-format-*.xlsx'))
-            assert len(backups)==1 and backups[0].read_bytes()==source
+            backups=list((home/'backups').glob('*.xlsx'))
+            assert len(backups)==2 and any(path.read_bytes()==source for path in backups) and any(path.read_bytes()==mirror_before for path in backups)
             assert api('/api/workbook/FORMATQA/format',payload,month)[0]==409
             for invalid in ({'range':'A0:B3'},{'range':'A1:XFD1048576'},{'font_size':0},{'column_width':-1},{'row_height':1},{'font_color':'not-a-color'},{'alignment':'sideways'},{'number_format':'INVALID_FORMAT'}):
                 assert api('/api/workbook/FORMATQA/format',{**payload,'fingerprint':saved['fingerprint'],**invalid},month)[0]==400,invalid
                 assert target.read_bytes()==changed
+            kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+            kernel.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+            kernel.CreateFileW.restype=wintypes.HANDLE
+            kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+            handle=kernel.CreateFileW(str(linked),0x80000000,1,None,3,0,None)
+            assert handle!=wintypes.HANDLE(-1).value,ctypes.get_last_error()
+            try:
+                assert api('/api/workbook/FORMATQA/format',{**payload,'fingerprint':saved['fingerprint'],'row_height':30},month)[0] in (400,409)
+                assert linked.read_bytes()==changed and target.read_bytes()!=changed
+                history=ok('/api/history',month=month)
+                pending=next(record for record in history if record['state']=='writing')
+                assert pending['request']['operation']=='format' and pending['request']['sheet']=='格式测试' and pending['request']['range']=='C3:D3'
+            finally:
+                kernel.CloseHandle(handle)
+            receipt=ok('/api/commit/'+pending['id'],{},month)
+            assert receipt['source_sync']['state']=='synced' and linked.read_bytes()==target.read_bytes()
+            assert contents(linked.read_bytes())==contents(source)
+            assert ok('/api/commit/'+pending['id'],{},month)['state']=='done'
             previous=(date.fromisoformat(month+'-01')-timedelta(days=1)).strftime('%Y-%m')
             history=home/'months'/previous/'workbooks';history.mkdir(parents=True);(history/'FORMATQA.xlsx').write_bytes(source)
             status,_=api('/api/workbook/FORMATQA/format',payload,previous)
@@ -120,7 +153,7 @@ def run(exe):
             if process is not None:
                 if process.poll() is None:process.terminate()
                 process.wait(timeout=10)
-        result=dict.fromkeys(['format_persisted_in_xlsx','style_properties_readback','formula_and_values_unchanged','unrelated_parts_unchanged','actual_target_reported','download_matches_saved','backup_matches_original','stale_fingerprint_rejected','invalid_format_and_range_rejected','history_month_read_only'],True)
+        result=dict.fromkeys(['format_persisted_in_xlsx','format_persisted_to_associated_original','source_only_value_before_binding_preserved','format_sync_lock_failure_recovers_from_history','unlinked_format_rejected','style_properties_readback','formula_and_values_unchanged','unrelated_parts_unchanged','actual_target_reported','download_matches_saved','backup_matches_original','stale_fingerprint_rejected','invalid_format_and_range_rejected','history_month_read_only'],True)
         (ROOT.parent/'runtime/format-smoke-result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         print(json.dumps(result))
 

@@ -50,6 +50,15 @@ def parts(data):
         return {name: archive.read(name) for name in archive.namelist()}
 
 
+def link_copy(code, data, folder, month):
+    """Only disposable external copies may be used as writable original files."""
+    path = Path(folder) / (code + '-理化') / month[:4] / month.replace('-', '.') / (code + '-理化-' + month.replace('-', '') + '.xlsx')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    ok('/api/workbook/' + code + '/source', {'path': str(path)}, month)
+    return path
+
+
 def sheet_paths(members):
     relations = {e.attrib['Id']: e.attrib['Target'] for e in ET.fromstring(members['xl/_rels/workbook.xml.rels'])}
     return {s.attrib['name']: 'xl/' + relations[s.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id']] for s in ET.fromstring(members['xl/workbook.xml']).find('s:sheets', NS)}
@@ -156,6 +165,7 @@ def main():
                 catalog = ok('/api/catalog')
                 projects = {p['code']: p for p in catalog['projects']}
                 assert set(projects) == {'D006', 'EF', 'NEW_LAB'}
+                linked = {code: link_copy(code, (old_dir / (code + '.xlsx')).read_bytes(), folder, old) for code in projects}
                 assert projects['EF']['name'] == '乙方理化项目'
                 assert len(projects['EF']['sheets']) == 20
                 for code, project in projects.items():
@@ -177,6 +187,7 @@ def main():
                 new_dir = home / 'months' / next_month / 'workbooks'
                 for name, data in originals.items():
                     assert (old_dir / name).read_bytes() == data
+                    assert linked[Path(name).stem].read_bytes() == data
                     verify_month(data, (new_dir / name).read_bytes(), rules[Path(name).stem])
                     code = Path(name).stem
                     assert ok(f'/api/workbook/{code}/download?month={next_month}') == (new_dir / name).read_bytes()

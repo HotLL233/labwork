@@ -10,7 +10,7 @@ parser.add_argument('--installer',type=Path)
 parser.add_argument('--app-id',default='LabworkRustPlatform')
 parser.add_argument('--report-dir',type=Path)
 args=parser.parse_args()
-installer=args.installer or Path('C:/labwork/releases')/f'v{version}/installer-r1'/f'labwork-{version}-Windows-x64-Setup-installer-r1.exe'
+installer=args.installer or Path('C:/labwork/releases')/f'v{version}/installer'/f'labwork-{version}-Windows-x64-Setup.exe'
 if args.app_id!='LabworkRustPlatform':
     assert args.app_id.startswith('LabworkRustPlatform-QA-') and args.app_id in installer.stem,'QA installer filename must identify its isolated AppId'
 key=fr'Software\Microsoft\Windows\CurrentVersion\Uninstall\{args.app_id}_is1'

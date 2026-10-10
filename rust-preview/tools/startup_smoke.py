@@ -136,6 +136,7 @@ def main():
                 print((home / 'startup.log').read_text(encoding='utf-8', errors='replace'))
                 raise
     result = {'gui_subsystem': subsystem, 'default_tray_alive_seconds': 5, 'adjacent_config': True, 'explicit_config': True, 'cli_overrides': True, 'pid_scoped_graceful_stop': True, 'headless_errors_nonzero': True, 'host_origin_port_guard': True, 'unknown_data_preserved': True}
+    (ROOT.parent / 'runtime/startup-smoke-result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps(result, indent=2))
 
 

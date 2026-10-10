@@ -96,6 +96,7 @@ def main():
                     server.ok('/api/workbook/' + code, data)
                 catalog = server.ok('/api/catalog')
                 month = catalog['active_month']
+                linked = {code: server.link_copy(code, data, folder, month) for code, data in originals.items()}
                 projects = {p['code']: p for p in catalog['projects']}
                 cases = [('EF', '二氟乙酸钠', {'col_C': '23.3', 'col_D': '0.15', 'col_E': '10'}), ('K001', '氢离子含量', {'col_C': '1', 'col_D': '12'}), ('K001', '硫酸根', {'col_C': '1.0537', 'col_D': '2.71', 'col_E': '0', 'col_H': '2', 'col_I': '10'})]
                 for code, sheet, overrides in cases:
@@ -126,6 +127,7 @@ def main():
                     assert all(members[name] == data for name, data in old_members.items() if name not in (path, 'xl/styles.xml'))
                     server.ok('/api/commit/' + result['id'], {})
                     assert working.read_bytes() == candidate
+                    assert linked[code].read_bytes() == candidate, 'Calculated result missing from associated original'
                     assert server.ok('/api/commit/' + result['id'], {})['state'] == 'done'
                     bad = dict(raw)
                     if 'col_D' in raw and code == 'EF':
@@ -140,7 +142,7 @@ def main():
             finally:
                 server.stop(process)
     assert all(hashlib.sha256(sources[code].read_bytes()).hexdigest() == digest for code, digest in hashes.items())
-    result = {'cases': tested, 'original_formula_decimal_parity': True, 'latest_calibration_selected': True, 'fixed_parameters_and_formula_dependencies': True, 'preview_no_write': True, 'commit_matches_preview': True, 'other_parts_preserved': True, 'zero_denominator_rejected': True, 'originals_unchanged': True}
+    result = {'cases': tested, 'calculated_results_saved_to_associated_original': True, 'original_formula_decimal_parity': True, 'latest_calibration_selected': True, 'fixed_parameters_and_formula_dependencies': True, 'preview_no_write': True, 'commit_matches_preview': True, 'other_parts_preserved': True, 'zero_denominator_rejected': True, 'originals_unchanged': True}
     (ROOT.parent / 'runtime/formula-smoke-result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(result, ensure_ascii=True, indent=2))
 

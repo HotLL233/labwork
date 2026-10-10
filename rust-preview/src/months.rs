@@ -58,9 +58,9 @@ pub fn saved_rules(home:&FsPath)->Result<BTreeMap<String,Vec<MonthRule>>,Error> 
     // Grid 7 discovers additional formula input columns; old confirmations must be reviewed again.
     let p=home.join("month-rules-v2.json");if !p.exists(){return Ok(BTreeMap::new());}serde_json::from_slice(&fs::read(p).map_err(error)?).map_err(error)
 }
-pub fn set_rules(home:&FsPath,month:&str,code:&str,rules:Vec<MonthRule>)->Result<(),Error> {
+pub fn set_rules(home:&FsPath,month:&str,code:&str,rules:Vec<MonthRule>,app:Option<&App>)->Result<(),Error> {
     writable(home,month)?;
-    let bytes=fs::read(book(home,month,code)?).map_err(error)?;
+    let bytes=if let Some(app)=app{source::read(app,month,code)?.0}else{fs::read(book(home,month,code)?).map_err(error)?};
     let sheets=workbook::sheet_names(&bytes).map_err(error)?;
     if rules.len()!=sheets.len() || sheets.iter().any(|s|rules.iter().filter(|r|&r.sheet==s).count()!=1) {return Err(error("请为每张工作表确认清空范围；参数表可不选任何列"));}
     workbook::blank_month(&bytes,&rules).map_err(error)?;
@@ -95,7 +95,7 @@ pub fn create(home:&FsPath,month:&str,app:Option<&App>)->Result<(),Error> {
     for entry in fs::read_dir(directory(home,previous).join("workbooks")).map_err(error)? {
         let path=entry.map_err(error)?.path();if path.extension().is_none_or(|e|e!="xlsx"){continue;}
         let code=path.file_stem().and_then(|s|s.to_str()).ok_or_else(||error("项目名无效"))?;
-        let bytes=fs::read(&path).map_err(error)?;
+        let bytes=if let Some(app)=app{source::read(app,previous,code)?.0}else{fs::read(&path).map_err(error)?};
         let project_rules=rules.get(code).ok_or_else(||error(format!("请先在项目 {code} 确认月模板清空范围")))?;
         let sheets=workbook::sheet_names(&bytes).map_err(error)?;
         if sheets.len()!=project_rules.len()||sheets.iter().any(|s|!project_rules.iter().any(|r|&r.sheet==s)){return Err(error(format!("项目 {code} 表结构已改变，请重新确认月模板规则")));}

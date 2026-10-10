@@ -44,7 +44,8 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
     home.mkdir();(home/'.labwork-rust-preview').write_text('test')
     shutil.copytree(source,home/'workbooks')
     log=open(Path(folder)/'server.log','w')
-    process=subprocess.Popen([str(root/'target/release/labwork-preview.exe'),'--headless','--port','19846','--home',str(home)],stdout=log,stderr=log)
+    exe=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'target/release/labwork-preview.exe'
+    process=subprocess.Popen([str(exe),'--headless','--port','19846','--home',str(home)],stdout=log,stderr=log)
     try:
         for attempt in range(60):
             try:
@@ -57,6 +58,13 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         active=request('/api/catalog')
         assert len(active['projects'])==2
         working=home/'months'/active['active_month']/'workbooks'
+        linked={}
+        for code in ('D006','Q'):
+            month=active['active_month']
+            path=Path(folder)/(code+'-理化')/month[:4]/month.replace('-','.')/(code+'-理化-'+month.replace('-','')+'.xlsx')
+            path.parent.mkdir(parents=True);path.write_bytes((working/(code+'.xlsx')).read_bytes())
+            request('/api/workbook/'+code+'/source',{'path':str(path)})
+            linked[code]=path
         total=0
         last_payload=None
         for project in catalog:
@@ -98,6 +106,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                 retry=request(f"/api/commit/{result['id']}",{})
                 assert retry['state']=='done' and retry['workbook_path']==receipt['workbook_path']
                 assert members(working/f"{project['code']}.xlsx")==after
+                assert members(linked[project['code']])==after,'Confirmed result missing from associated original'
                 total+=1;last_payload=payload
         assert total==14
         fails(403,'/api/preview',last_payload,{'X-Labwork-Token':'wrong'})
@@ -114,7 +123,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         with closing(sqlite3.connect(home/'preview.sqlite3')) as db:
             assert db.execute("SELECT count(*) FROM previews WHERE state='done'").fetchone()[0]==15
             assert json.loads(db.execute('SELECT method_snapshot FROM previews LIMIT 1').fetchone()[0])['kind']
-        assert len(list((home/'backups').glob('*.xlsx')))==15
+        assert len(list((home/'backups').glob('source-*.xlsx')))==15
         method=catalog[1]['methods'][0]
         raw={f['key']:f['sample'] for f in method['fields']}
         payload={'project':'D006','method':'water','entries':[
@@ -163,7 +172,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         assert before_invalid==members(working/'D006.xlsx')
         fails(400,'/api/preview',dict(payload,measurements=[raw]))
         assert len(request('/api/history'))>=18
-        qbook=working/'Q.xlsx'
+        qbook=linked['Q']
         parts=members(qbook)
         wb=ET.fromstring(parts['xl/workbook.xml'])
         props=wb.find('s:workbookPr',ns)
@@ -175,7 +184,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         pending=[r for r in q1904['view']['rows'] if r['number'] in q1904['rows']]
         assert pending[0]['cells'][0]['value']=='2026-10-20' and pending[0]['cells'][0]['raw']=='44853'
         assert original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in source.glob('*.xlsx')}
-        result={'methods':total,'decimal_parity':True,'unrelated_zip_members_preserved':True,'preview_no_write':True,'idempotence':True,'concurrent_conflict':True,'interrupted_finalize_recovery':True,'csrf_and_host_check':True,'sqlite_snapshots':True,'originals_unchanged':True,'multi_batch_grouping':True,'date_display_and_single_labels':True,'continued_group_blanks':True,'all_200_pending_rows_visible':True,'invalid_batch_atomic_rejection':True,'date1904_and_style_reuse':True,'historical_compact_dates':True}
+        result={'methods':total,'associated_originals_match_confirmed_results':True,'decimal_parity':True,'unrelated_zip_members_preserved':True,'preview_no_write':True,'idempotence':True,'concurrent_conflict':True,'interrupted_finalize_recovery':True,'csrf_and_host_check':True,'sqlite_snapshots':True,'originals_unchanged':True,'multi_batch_grouping':True,'date_display_and_single_labels':True,'continued_group_blanks':True,'all_200_pending_rows_visible':True,'invalid_batch_atomic_rejection':True,'date1904_and_style_reuse':True,'historical_compact_dates':True}
         (root.parent/'runtime/rust-smoke-result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         print(json.dumps(result,indent=2))
     finally:

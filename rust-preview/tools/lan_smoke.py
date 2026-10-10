@@ -105,11 +105,13 @@ def run():
                     process.terminate()
                 process.wait(timeout=10)
         assert password not in log_path.read_text(encoding="utf-8", errors="replace"), "password leaked to log"
-        print(json.dumps({"ok": True, "version": catalog["version"], "checks": [
+        result={"ok": True, "version": catalog["version"], "checks": [
             "anonymous_redirect_and_api_401", "public_login_assets", "actual_lan_connection",
             "login_origin_required", "bad_password", "http_only_same_site_cookie", "authenticated_catalog",
             "host_origin_rejection", "lan_login", "same_data_second_instance_rejected",
-            "five_failures_rate_limit", "password_not_logged"]}, ensure_ascii=False))
+            "five_failures_rate_limit", "password_not_logged"]}
+        (ROOT.parent / 'runtime/lan-smoke-result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+        print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

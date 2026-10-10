@@ -27,6 +27,42 @@ fn local_path(path:&str)->Result<PathBuf,Error>{
 fn external(app:&App,path:&Path)->Result<(),Error>{
     if path.starts_with(fs::canonicalize(&app.home).map_err(error)?){return Err(error("不能将平台管理目录中的文件作为原表"));}Ok(())
 }
+fn available(app:&App,path:&str,month:&str,code:&str)->Result<(),Error>{
+    let occupied:bool=app.db.query_row("SELECT EXISTS(SELECT 1 FROM source_links WHERE path=?1 AND NOT(month=?2 AND project=?3))",params![path,month,code],|r|r.get(0)).map_err(error)?;
+    if occupied{return Err(conflict("此原表已关联其他项目或月份，请使用独立原表"));}Ok(())
+}
+pub fn read(app:&App,month:&str,code:&str)->Result<(Vec<u8>,Option<Binding>),Error>{
+    let working=app.book(code,month)?;
+    let Some(mut binding)=get(&app.db,month,code)? else{return Ok((fs::read(working).map_err(error)?,None));};
+    let path=local_path(&binding.path)?;external(app,&path)?;
+    let bytes=fs::read(path).map_err(error)?;
+    import::validate(&bytes,&Project{code:code.into(),name:code.into(),methods:vec![]}).map_err(error)?;
+    binding.hash=hash(&bytes);
+    Ok((bytes,Some(binding)))
+}
+pub fn import_file(app:&App,month:&str,code:&str,path:&str,name:&str)->Result<Value,Error>{
+    months::writable(&app.home,month)?;
+    if !months::code_valid(code)||name.chars().count()>100{return Err(error("项目编号或名称无效"));}
+    let source=local_path(path)?;external(app,&source)?;
+    let path=display_path(&source);available(app,&path,"","")?;
+    if get(&app.db,month,code)?.is_some(){return Err(conflict("此项目已有原文件关联，不会覆盖"));}
+    let bytes=fs::read(&source).map_err(error)?;
+    let project=Project{code:code.into(),name:name.into(),methods:vec![]};
+    let mut result=import::bind(&months::directory(&app.home,month),&project,&bytes)?;
+    let destination=app.book(code,month)?;
+    let binding=Binding{path,hash:hash(&bytes)};
+    let saved=(||{
+        if hash(&fs::read(&source).map_err(error)?)!=binding.hash{return Err(conflict("原文件在导入期间发生变化，请重新导入"));}
+        app.db.execute("INSERT INTO source_links(month,project,path,hash) VALUES(?1,?2,?3,?4)",params![month,code,binding.path,binding.hash]).map_err(error)?;
+        months::name_project(&app.home,code,name)?;Ok(())
+    })();
+    if let Err(e)=saved{
+        app.db.execute("DELETE FROM source_links WHERE month=?1 AND project=?2 AND path=?3 AND hash=?4",params![month,code,binding.path,binding.hash]).map_err(error)?;
+        if hash(&fs::read(&destination).map_err(error)?)==binding.hash{fs::remove_file(&destination).map_err(error)?;}
+        return Err(e);
+    }
+    result["code"]=json!(code);result["source_link"]=json!(binding);Ok(result)
+}
 pub fn bind(app:&App,month:&str,code:&str,path:Option<String>)->Result<Option<Binding>,Error>{
     months::writable(&app.home,month)?;
     let working=app.book(code,month)?;
@@ -35,9 +71,9 @@ pub fn bind(app:&App,month:&str,code:&str,path:Option<String>)->Result<Option<Bi
     let Some(path)=path else{app.db.execute("DELETE FROM source_links WHERE month=?1 AND project=?2",params![month,code]).map_err(error)?;return Ok(None);};
     let path=local_path(&path)?;external(app,&path)?;
     let path=display_path(&path);
-    let occupied:bool=app.db.query_row("SELECT EXISTS(SELECT 1 FROM source_links WHERE path=?1 AND NOT(month=?2 AND project=?3))",params![path,month,code],|r|r.get(0)).map_err(error)?;
-    if occupied{return Err(conflict("此原表已关联其他项目或月份，请使用独立原表"));}
+    available(app,&path,month,code)?;
     let bytes=fs::read(&path).map_err(error)?;
+    import::validate(&bytes,&Project{code:code.into(),name:code.into(),methods:vec![]}).map_err(error)?;
     if workbook::sheet_names(&bytes).map_err(error)?!=workbook::sheet_names(&fs::read(working).map_err(error)?).map_err(error)? {return Err(error("原表工作表名称或顺序与当前项目不一致"));}
     let binding=Binding{path,hash:hash(&bytes)};
     app.db.execute("INSERT INTO source_links(month,project,path,hash) VALUES(?1,?2,?3,?4) ON CONFLICT(month,project) DO UPDATE SET path=excluded.path,hash=excluded.hash",params![month,code,binding.path,binding.hash]).map_err(error)?;
@@ -47,10 +83,10 @@ pub fn check(app:&App,month:&str,code:&str,snapshot:Option<&Binding>,after:&str)
     let current=get(&app.db,month,code)?;
     match (snapshot,current.as_ref()) {
         (None,None)=>Ok(()),
-        (Some(before),Some(current)) if before.path==current.path&&(current.hash==before.hash||current.hash==after)=>{
+        (Some(before),Some(current)) if before.path==current.path=>{
             let path=local_path(&before.path).map_err(|_|conflict("关联原表不存在或无法读取，请检查原表后重新预览"))?;external(app,&path)?;
             let actual=hash(&fs::read(&path).map_err(|_|conflict("原表被占用或无法读取"))?);
-            if actual!=before.hash&&actual!=after{return Err(conflict("原表已被Excel/WPS或其他用户修改，未写入；请重新关联确认后重新预览"));}Ok(())
+            if actual!=before.hash&&actual!=after{return Err(conflict("原表已被Excel/WPS或其他用户修改，未写入；请重新计算并预览"));}Ok(())
         },
         _=>Err(conflict("原表关联已变化，请重新预览后写入")),
     }

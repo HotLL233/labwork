@@ -143,7 +143,9 @@ def main():
                 assert process.returncode == 0, process.returncode
     for name, fingerprint in fingerprints.items():
         assert hashlib.sha256((SOURCE / f'{name}.xlsx').read_bytes()).hexdigest() == fingerprint
-    print(json.dumps({'bind_D006_Q': True, 'valid_body_above_global_1MiB': True, 'large_workbook_bytes': len(sources['D006']), 'catalog_and_sheet_available': True, 'no_overwrite': True, 'concurrent_first_bind': True, 'invalid_rejected_dynamic_projects_supported': True, 'size_and_zip_bomb_rejected': True, 'macro_template_traversal_rejected': True, 'malformed_columns_merges_rejected_without_crash': True, 'token_origin_guard': True, 'originals_unchanged': True, 'temporary_files_cleaned': True}, indent=2))
+    result = {'bind_D006_Q': True, 'valid_body_above_global_1MiB': True, 'large_workbook_bytes': len(sources['D006']), 'catalog_and_sheet_available': True, 'no_overwrite': True, 'concurrent_first_bind': True, 'invalid_rejected_dynamic_projects_supported': True, 'size_and_zip_bomb_rejected': True, 'macro_template_traversal_rejected': True, 'malformed_columns_merges_rejected_without_crash': True, 'token_origin_guard': True, 'originals_unchanged': True, 'temporary_files_cleaned': True}
+    (ROOT.parent / 'runtime/import-smoke-result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == '__main__':

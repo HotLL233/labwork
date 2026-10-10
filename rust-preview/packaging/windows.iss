@@ -1,4 +1,4 @@
-#define Version "0.0.2-alpha.1-grid.8"
+#define Version "0.0.2-alpha.1-grid.9"
 #ifndef AppIdValue
   #define AppIdValue "LabworkRustPlatform"
 #endif
@@ -19,8 +19,8 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-OutputDir=..\..\..\..\releases\v{#Version}\installer-r1
-OutputBaseFilename=labwork-{#Version}-Windows-x64-Setup-installer-r1
+OutputDir=..\..\..\..\releases\v{#Version}\installer
+OutputBaseFilename=labwork-{#Version}-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

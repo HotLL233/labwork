@@ -1,10 +1,12 @@
 """Verify source writeback using disposable copies, never original workbooks."""
 import hashlib
+from contextlib import closing
 import ctypes
 from ctypes import wintypes
 import io
 import json
 import socket
+import sqlite3
 import tempfile
 import zipfile
 from pathlib import Path
@@ -19,7 +21,8 @@ def changed_copy(data):
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
         for name, content in server.parts(data).items():
-            archive.writestr(name, content)
+            if name != 'docProps/source-smoke.xml':
+                archive.writestr(name, content)
         archive.writestr('docProps/source-smoke.xml', '<external-change/>')
     return output.getvalue()
 
@@ -56,6 +59,35 @@ def main():
                 def bind(path):
                     return server.ok(endpoint, {'path': str(path) if path else None}, month)
 
+                unlinked = preview('UNLINKED-MUST-NOT-WRITE')
+                assert commit(unlinked)[0] == 409
+                assert source.read_bytes() == working.read_bytes() == original
+
+                imported_source = folder / 'IMPORTED-理化' / month[:4] / month.replace('-', '.') / ('IMPORTED-理化-' + month.replace('-', '') + '.xlsx')
+                imported_source.parent.mkdir(parents=True)
+                imported_source.write_bytes(original)
+                imported = server.ok('/api/workbook/IMPORTED/source-import', {'path': str(imported_source), 'name': '服务器导入原文件'}, month)
+                assert imported['source_link']['path'] == str(imported_source) and imported['code'] == 'IMPORTED'
+                assert (working.parent / 'IMPORTED.xlsx').read_bytes() == imported_source.read_bytes() == original
+                assert server.api('/api/workbook/DUPLICATE/source-import', {'path': str(imported_source)}, month)[0] == 409
+                assert not (working.parent / 'DUPLICATE.xlsx').exists()
+                assert server.api('/api/workbook/IMPORTED/source-import', {'path': str(alternate)}, month)[0] == 409
+                assert (working.parent / 'IMPORTED.xlsx').read_bytes() == original
+                imported_project = next(p for p in server.ok('/api/catalog')['projects'] if p['code'] == 'IMPORTED')
+                assert imported_project['source_link'] and imported_project['name'] == '服务器导入原文件'
+
+                names_file = home / 'project-names.json'
+                previous_names = names_file.read_bytes()
+                names_file.write_bytes(b'not valid json')
+                try:
+                    assert server.api('/api/workbook/FAILED/source-import', {'path': str(alternate), 'name': '失败应回滚'}, month)[0] == 400
+                    assert not (working.parent / 'FAILED.xlsx').exists()
+                    with closing(sqlite3.connect(home / 'preview.sqlite3')) as db:
+                        assert db.execute("SELECT count(*) FROM source_links WHERE project='FAILED'").fetchone()[0] == 0
+                    assert alternate.read_bytes() == original
+                finally:
+                    names_file.write_bytes(previous_names)
+
                 for invalid in ['relative.xlsx', str(folder / 'missing.xlsx'), str(working), r'\\server\share\source.xlsx']:
                     assert server.api(endpoint, {'path': invalid}, month)[0] in (400, 409), invalid
                 wrong = folder / 'wrong.txt'
@@ -91,6 +123,28 @@ def main():
                 assert source.read_bytes() == working.read_bytes() == candidate
                 assert len([p for p in (home / 'backups').rglob('*') if p.is_file()]) == backup_count
 
+                def legacy_snapshot(result, state):
+                    with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                        value = json.loads(db.execute('SELECT method_snapshot FROM previews WHERE id=?', [result['id']]).fetchone()[0])
+                        value.pop('workspace_before_hash')
+                        db.execute('UPDATE previews SET method_snapshot=?,state=? WHERE id=?', [json.dumps(value), state, result['id']])
+
+                legacy_pending = preview('LEGACY-PREVIEW-REJECTED')
+                legacy_snapshot(legacy_pending, 'preview')
+                assert commit(legacy_pending)[0] == 409
+                assert source.read_bytes() == working.read_bytes() == candidate
+
+                legacy_writing = preview('LEGACY-WRITING-RECOVERY')
+                legacy_bytes = server.ok('/api/download/' + legacy_writing['id'])
+                legacy_snapshot(legacy_writing, 'writing')
+                working.write_bytes(legacy_bytes)
+                assert commit(legacy_writing)[0] == 409
+                assert source.read_bytes() == candidate and working.read_bytes() == legacy_bytes
+                source.write_bytes(legacy_bytes)
+                assert commit(legacy_writing)[0] == 200
+                candidate = legacy_bytes
+                assert source.read_bytes() == working.read_bytes() == candidate
+
                 interrupted = preview('SOURCE-INTERRUPTED')
                 interrupted_bytes = server.ok('/api/download/' + interrupted['id'])
                 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -113,11 +167,41 @@ def main():
                 candidate = interrupted_bytes
                 assert source.read_bytes() == working.read_bytes() == candidate
 
+                # An Excel edit before preview is authoritative, even when the monthly mirror is older.
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+                    for name, content in server.parts(changed_copy(candidate)).items():
+                        archive.writestr(name, content.replace(b'SOURCE-SYNC-01', b'SOURCE-ONLY-01'))
+                source_only = output.getvalue()
+                source.write_bytes(source_only)
+                assert source.read_bytes() != working.read_bytes()
+                authoritative = preview('SOURCE-AUTHORITATIVE-APPEND')
+                assert source.read_bytes() == source_only and working.read_bytes() == candidate
+                authoritative_bytes = server.ok('/api/download/' + authoritative['id'])
+                assert any(b'SOURCE-ONLY-01' in data for name, data in server.parts(authoritative_bytes).items() if name.startswith('xl/worksheets/'))
+                assert server.parts(authoritative_bytes)['docProps/source-smoke.xml'] == b'<external-change/>'
+                assert commit(authoritative)[0] == 200
+                candidate = authoritative_bytes
+                assert source.read_bytes() == working.read_bytes() == candidate
+
                 pending = preview('SOURCE-CONFLICT')
                 external = changed_copy(candidate)
                 source.write_bytes(external)
                 assert commit(pending)[0] == 409
                 assert source.read_bytes() == external and working.read_bytes() == candidate
+
+                moved = source.with_suffix('.moved')
+                source.rename(moved)
+                try:
+                    missing = next(p for p in server.ok('/api/catalog')['projects'] if p['code'] == 'D006')
+                    assert missing['source_error'] and missing['source_link']['path'] == str(source)
+                    assert server.api('/api/preview', {'project': 'D006', 'method': 'water', 'entries': [{'date': month + '-10', 'batch': 'MISSING-SOURCE', 'measurement': {'result': '1'}}]}, month)[0] in (400, 409)
+                    assert moved.read_bytes() == external and working.read_bytes() == candidate
+                    bind(alternate)
+                    assert next(p for p in server.ok('/api/catalog')['projects'] if p['code'] == 'D006')['source_error'] is None
+                    assert alternate.read_bytes() == original
+                finally:
+                    moved.rename(source)
 
                 bind(source)
                 stale = preview('SOURCE-STALE-BINDING')
@@ -127,7 +211,7 @@ def main():
                 bind(None)
                 unlinked = preview('SOURCE-UNLINKED')
                 status, response = commit(unlinked)
-                assert status == 200 and response['source_sync']['state'] == 'unlinked', (status, response)
+                assert status == 409, (status, response)
                 assert source.read_bytes() == external and alternate.read_bytes() == original
 
                 bind(source)
@@ -166,7 +250,7 @@ def main():
             finally:
                 server.stop(process)
     assert fixture.read_bytes() == original
-    report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
+    report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
     (ROOT.parent / 'runtime/source-smoke-result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
 
