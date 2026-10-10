@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "labwork-preview"
-version = "0.0.2-alpha.1-grid.7"
+version = "0.0.2-alpha.1-grid.8"
 dependencies = [
  "axum",
  "bigdecimal",

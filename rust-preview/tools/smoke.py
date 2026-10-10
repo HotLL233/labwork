@@ -91,8 +91,12 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                         v=after_xml.find(f".//s:c[@r='{method['columns']['result']}{r}']/s:v",ns)
                         assert v is not None and Decimal(v.text)==Decimal(o['result'])
                 assert before==members(working/f"{project['code']}.xlsx"),'Preview must not write working file'
-                assert request(f"/api/commit/{result['id']}",{})['state']=='done'
-                assert request(f"/api/commit/{result['id']}",{})['state']=='done'
+                receipt=request(f"/api/commit/{result['id']}",{})
+                assert receipt['state']=='done' and receipt['sheet']==method['sheet'] and receipt['rows']==result['rows']
+                assert Path(receipt['workbook_path']).resolve()==(working/f"{project['code']}.xlsx").resolve()
+                assert request(receipt['download'])==(working/f"{project['code']}.xlsx").read_bytes()
+                retry=request(f"/api/commit/{result['id']}",{})
+                assert retry['state']=='done' and retry['workbook_path']==receipt['workbook_path']
                 assert members(working/f"{project['code']}.xlsx")==after
                 total+=1;last_payload=payload
         assert total==14

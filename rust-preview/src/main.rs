@@ -2,6 +2,7 @@
 mod config;
 mod formula;
 mod months;
+mod source;
 mod auth;
 mod import;
 mod calc;
@@ -107,7 +108,7 @@ async fn catalog(State(state): State<Shared>,headers:HeaderMap) -> Result<Json<V
         let sheets=workbook::sheet_names(&bytes).map_err(error)?;
         let confirmed=rules.get(code).is_some_and(|r|r.len()==sheets.len()&&sheets.iter().all(|s|r.iter().any(|r|&r.sheet==s)));
         monthly_rules.insert(code.to_owned(),if confirmed{rules[code].clone()}else{workbook::discover(&bytes).map_err(error)?});
-        projects.push(json!({"code":code,"name":names.get(code).cloned().unwrap_or_else(||code.into()),"methods":methods,"available":true,"rules_confirmed":confirmed,"sheets":sheets.iter().enumerate().map(|(i,name)|json!({"name":name,"key":format!("s{i}"),"method_key":methods.iter().find(|m|m.sheet.trim()==name.trim()).map(|m|&m.key),"reason":if methods.iter().any(|m|m.sheet.trim()==name.trim()){None}else{workbook::generic_error(&bytes,name)}})).collect::<Vec<_>>()}));
+        projects.push(json!({"code":code,"name":names.get(code).cloned().unwrap_or_else(||code.into()),"methods":methods,"workbook_path":path.display().to_string(),"source_link":source::get(&app.db,&month,code)?,"available":true,"rules_confirmed":confirmed,"sheets":sheets.iter().enumerate().map(|(i,name)|json!({"name":name,"key":format!("s{i}"),"method_key":methods.iter().find(|m|m.sheet.trim()==name.trim()).map(|m|&m.key),"reason":if methods.iter().any(|m|m.sheet.trim()==name.trim()){None}else{workbook::generic_error(&bytes,name)}})).collect::<Vec<_>>()}));
     }
     projects.sort_by(|a,b|a["code"].as_str().cmp(&b["code"].as_str()));
     Ok(Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"lan_url":if app.lan_ip.is_empty(){None}else{Some(format!("http://{}:{}",app.lan_ip,app.port))},"data_directory":app.home.display().to_string(),"projects":projects,"active_month":month,"current_month":months::current(),"months":all_months,"writable":months::writable(&app.home,&month).is_ok(),"month_ready":true,"monthly_rules":monthly_rules})))
@@ -124,13 +125,21 @@ async fn bind_workbook(State(state):State<Shared>,Path(code):Path<String>,Query(
 }
 #[derive(Deserialize)]
 struct MonthRequest {month:String}
+#[derive(Deserialize)]
+struct SourceRequest {path:Option<String>}
+async fn bind_source(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<SourceRequest>)->Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    let month=months::select(&app.home,&headers)?;months::writable(&app.home,&month)?;
+    let binding=source::bind(&app,&month,&code,request.path)?;
+    Ok(Json(json!({"source_link":binding})))
+}
 async fn download_book(State(state):State<Shared>,Path(code):Path<String>,Query(query):Query<MonthRequest>)->Result<Response,Error> {
     let app=state.lock().unwrap();
     let bytes=fs::read(app.book(&code,&query.month)?).map_err(error)?;
     Ok(([(header::CONTENT_TYPE,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_owned()),(header::CONTENT_DISPOSITION,format!("attachment; filename=\"{code}-{}.xlsx\"",query.month))],bytes).into_response())
 }
 async fn choose_month(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<MonthRequest>)->Result<Json<Value>,Error> {
-    let app=state.lock().unwrap();authorize(&app,&headers)?;months::create(&app.home,&request.month)?;Ok(Json(json!({"month":request.month})))
+    let app=state.lock().unwrap();authorize(&app,&headers)?;let previous=months::list(&app.home)?.last().cloned().ok_or_else(||error("缺少月份"))?;pending_write(&app,&previous,None)?;months::create(&app.home,&request.month,Some(&app))?;Ok(Json(json!({"month":request.month})))
 }
 #[derive(Deserialize)]
 struct RuleRequest {rules:Vec<workbook::MonthRule>}
@@ -147,7 +156,7 @@ async fn raw_sheet(State(state):State<Shared>,Path((code,key)):Path<(String,Stri
     let names=workbook::sheet_names(&bytes).map_err(error)?;
     let index=key.strip_prefix('s').and_then(|s|s.parse::<usize>().ok()).ok_or_else(||error("工作表编号无效"))?;
     let name=names.get(index).ok_or_else(||error("工作表不存在"))?;
-    Ok(Json(json!({"view":workbook::raw_view(&bytes,name,query.start).map_err(error)?})))
+    Ok(Json(json!({"view":workbook::raw_view(&bytes,name,query.start).map_err(error)?,"fingerprint":hash(&bytes)})))
 }
 async fn sheet(State(state): State<Shared>,Path((project,method)):Path<(String,String)>,headers:HeaderMap) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap();let month=months::select(&app.home,&headers)?;
@@ -163,9 +172,13 @@ fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
     }
     Ok(())
 }
+fn pending_write(app:&App,month:&str,project:Option<&str>)->Result<(),Error>{
+    let pending:bool=app.db.query_row("SELECT EXISTS(SELECT 1 FROM previews WHERE state='writing' AND json_extract(request,'$.month')=?1 AND (?2 IS NULL OR json_extract(request,'$.project')=?2))",params![month,project],|r|r.get(0)).map_err(error)?;
+    if pending{return Err((StatusCode::CONFLICT,Json(json!({"error":"存在尚未完成的写入，请在写入历史中重试完成后继续"}))));}Ok(())
+}
 async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):Json<Request>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap(); authorize(&app,&headers)?;
-    request.month=months::select(&app.home,&headers)?;months::writable(&app.home,&request.month)?;
+    request.month=months::select(&app.home,&headers)?;months::writable(&app.home,&request.month)?;pending_write(&app,&request.month,Some(&request.project))?;
     let bytes=fs::read(app.book(&request.project,&request.month)?).map_err(error)?;
     let method=app.mapped_methods(&request.project,&bytes).into_iter().find(|m|m.key==request.method).ok_or_else(||error("此表尚无校核的计算方法"))?;
     request.normalize().map_err(error)?;
@@ -175,23 +188,31 @@ async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):
     let view=workbook::view(&candidate,&method,&rows).map_err(error)?;
     let id=random_id();
     let created=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-    app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,'preview',?8)",params![id,created,serde_json::to_string(&request).unwrap(),serde_json::to_string(&outputs).unwrap(),hash(&bytes),hash(&candidate),serde_json::to_string(&rows).unwrap(),serde_json::to_string(&method).unwrap()]).map_err(error)?;
+    let mut snapshot=json!(&method);snapshot["source_link"]=json!(source::get(&app.db,&request.month,&request.project)?);
+    app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,'preview',?8)",params![id,created,serde_json::to_string(&request).unwrap(),serde_json::to_string(&outputs).unwrap(),hash(&bytes),hash(&candidate),serde_json::to_string(&rows).unwrap(),serde_json::to_string(&snapshot).unwrap()]).map_err(error)?;
     fs::write(app.home.join("previews").join(format!("{id}.xlsx")),candidate).map_err(error)?;
     Ok(Json(json!({"id":id,"entries":request.entries,"outputs":outputs,"rows":rows,"view":view,"state":"preview","download":format!("/api/download/{id}")})))
 }
 async fn commit(State(state):State<Shared>,headers:HeaderMap,Path(id):Path<String>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap(); authorize(&app,&headers)?;
-    let (raw,before,after,status):(String,String,String,String)=app.db.query_row("SELECT request,before_hash,after_hash,state FROM previews WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|_|error("预览不存在"))?;
+    let (raw,before,after,status,saved_rows,snapshot):(String,String,String,String,String,String)=app.db.query_row("SELECT request,before_hash,after_hash,state,rows,method_snapshot FROM previews WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|_|error("预览不存在"))?;
     let mut request:Request=serde_json::from_str(&raw).map_err(error)?;
     if request.month.is_empty(){request.month=months::list(&app.home)?.first().cloned().ok_or_else(||error("缺少原始月份"))?;}
     months::writable(&app.home,&request.month)?;
     if months::select(&app.home,&headers)?!=request.month{return Err(error("预览属于其他月份，请切回对应月份"));}
     let book=app.book(&request.project,&request.month)?;
     let current=hash(&fs::read(&book).map_err(error)?);
-    if status=="done" {return Ok(Json(json!({"state":"done","message":"已写入工作副本，无重复追加"})));}
+    let saved_rows:Vec<u32>=serde_json::from_str(&saved_rows).map_err(error)?;
+    let sheet=serde_json::from_str::<Method>(&snapshot).map(|m|m.sheet).unwrap_or_default();
+    let snapshot:Value=serde_json::from_str(&snapshot).map_err(error)?;
+    let binding:Option<source::Binding>=serde_json::from_value(snapshot.get("source_link").cloned().unwrap_or(Value::Null)).map_err(error)?;
+    let result=|message:&str|Json(json!({"state":"done","message":message,"workbook_path":book.display().to_string(),"sheet":sheet,"rows":saved_rows,"source_sync":if let Some(ref b)=binding{json!({"state":"synced","path":b.path,"message":"已同步关联原文件"})}else{json!({"state":"unlinked","message":"未关联原文件，仅保存月份副本"})},"download":format!("/api/workbook/{}/download?month={}",request.project,request.month)}));
+    if status=="done" {return Ok(result("已写入当前月份工作簿，无重复追加"));}
+    source::check(&app,&request.month,&request.project,binding.as_ref(),&after)?;
     if status=="writing" && current==after {
+        source::sync(&app,&request.month,&request.project,binding.as_ref(),&fs::read(&book).map_err(error)?,&id)?;
         app.db.execute("UPDATE previews SET state='done' WHERE id=?1",[&id]).map_err(error)?;
-        return Ok(Json(json!({"state":"done","message":"已恢复中断后的写入状态"})));
+        return Ok(result("已恢复中断后的写入状态"));
     }
     if current!=before {return Err((StatusCode::CONFLICT,Json(json!({"error":"工作簿已经变化，请重新计算并预览；未覆盖文件"}))));}
     let candidate=app.home.join("previews").join(format!("{id}.xlsx"));
@@ -206,8 +227,27 @@ async fn commit(State(state):State<Shared>,headers:HeaderMap,Path(id):Path<Strin
     app.db.execute("UPDATE previews SET state='writing' WHERE id=?1",[&id]).map_err(error)?;
     // Windows rename cannot replace an existing file; use the native replacement below.
     workbook::replace_file(&temp,&book).map_err(|e|error(format!("文件被占用或无写入权限：{e}；请关闭Excel/WPS后重试")))?;
+    source::sync(&app,&request.month,&request.project,binding.as_ref(),&fs::read(&book).map_err(error)?,&id).map_err(|(status,body)|(status,Json(json!({"error":format!("月份副本已保存，但原文件尚未同步：{}。请排除占用或冲突后再次点击确认写入，不会重复追加",body.0["error"].as_str().unwrap_or("同步失败"))}))))?;
     app.db.execute("UPDATE previews SET state='done' WHERE id=?1",[&id]).map_err(error)?;
-    Ok(Json(json!({"state":"done","message":"已写入工作副本；原表未改动"})))
+    Ok(result(if binding.is_some(){"已保存月份工作簿并同步关联原文件"}else{"已保存月份工作簿；尚未关联原文件"}))
+}
+#[derive(Deserialize)]
+struct FormatRequest { fingerprint:String, #[serde(flatten)] format:workbook::FormatRequest }
+async fn format_workbook(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<FormatRequest>)->Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    let month=months::select(&app.home,&headers)?;months::writable(&app.home,&month)?;
+    pending_write(&app,&month,Some(&code))?;
+    let path=app.book(&code,&month)?;let before=fs::read(&path).map_err(error)?;
+    if request.fingerprint!=hash(&before){return Err((StatusCode::CONFLICT,Json(json!({"error":"工作簿已经变化，请刷新后重新设置格式"}))));}
+    let bytes=workbook::format_cells(&before,&request.format).map_err(error)?;
+    let view=workbook::raw_view(&bytes,&request.format.sheet,1).map_err(error)?;
+    let id=random_id();let backup=app.home.join("backups").join(format!("{code}-format-{id}.xlsx"));
+    fs::write(&backup,&before).map_err(error)?;
+    if hash(&fs::read(&backup).map_err(error)?)!=request.fingerprint{return Err(error("格式修改前备份校验失败"));}
+    let temp=path.with_extension(format!("{id}.tmp"));fs::write(&temp,&bytes).map_err(error)?;
+    if hash(&fs::read(&path).map_err(error)?)!=request.fingerprint{let _=fs::remove_file(&temp);return Err((StatusCode::CONFLICT,Json(json!({"error":"文件在保存期间发生变化，请刷新后重试"}))));}
+    if let Err(e)=workbook::replace_file(&temp,&path){let _=fs::remove_file(&temp);return Err(error(format!("格式未保存：{e}；请关闭Excel/WPS后重试")));}
+    Ok(Json(json!({"view":view,"fingerprint":hash(&bytes),"workbook_path":path.display().to_string(),"message":"格式已保存到当前月份工作簿"})))
 }
 async fn download(State(state):State<Shared>,Path(id):Path<String>) -> Result<Response,Error> {
     let app=state.lock().unwrap();
@@ -257,7 +297,7 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let db=Connection::open(home.join("preview.sqlite3"))?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
-    access.restore(&db)?;
+    access.restore(&db)?;source::initialize(&db)?;
     let (shutdown_tx,shutdown_rx)=tokio::sync::oneshot::channel::<()>();
     #[cfg(windows)]
     let _tray=if tray_mode {Some(tray::start(home.clone(),port,shutdown_tx)?)}else{drop(shutdown_tx);None};
@@ -267,6 +307,8 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let router=Router::new().route("/",get(index)).route("/app.css",get(css)).route("/app.js",get(js)).route("/grid.js",get(grid_js))
         .route("/login",get(auth::page)).route("/login.js",get(auth::script)).route("/api/login",post(auth::login)).route("/api/logout",post(auth::logout))
         .route("/api/workbook/{project}/download",get(download_book))
+        .route("/api/workbook/{project}/format",post(format_workbook))
+        .route("/api/workbook/{project}/source",post(bind_source))
         .route("/api/month",post(choose_month)).route("/api/month-rules/{project}",post(month_rules)).route("/api/book-sheet/{project}/{sheet}",get(raw_sheet))
         .route("/api/workbook/{project}",post(bind_workbook).layer(DefaultBodyLimit::max(import::MAX_BYTES)))
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))

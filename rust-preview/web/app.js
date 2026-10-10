@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 let catalog=[],catalogInfo={},selectedSheet=null,project,method,baseView,nextRow=4,rows=[],previewId=null,busy=false,writing=false,inputVersion=0,selection=null,anchor=null,drag=null,undo=[];
-let sheetRequestId=0,rawNext=null;
+let sheetRequestId=0,rawNext=null,workbookFingerprint=null;
 let selectedMonth=sessionStorage.getItem('labwork-month')||'';
 const token=document.querySelector('meta[name="labwork-token"]').content;
 const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -80,7 +80,7 @@ function sheet(view,draft=false){
   if(draft&&method&&writable()){rows.forEach((row,i)=>{html+=`<tr class="draft-row"><td class="row-num">${nextRow+i}</td>`;view.columns.forEach(col=>{const f=fields().find(f=>method.columns[method.kind==='water_diluted'&&f.key==='result'?'raw_result':f.key]===col.label);html+=f?`<td class="edit-cell" data-index="${i}" data-key="${f.key}">${input(i,f.key)}</td>`:'<td></td>';});html+='</tr>';});}
   $('sheet').innerHTML=html+'</tbody>';
   const cellMap=new Map(view.rows.flatMap(r=>r.cells.map(c=>[c.ref,c])));
-  $('sheet').querySelectorAll('td[data-ref]').forEach(td=>{const cell=cellMap.get(td.dataset.ref);Object.assign(td.style,view.styles[cell.style]||{});td.addEventListener('click',()=>{$('sheet').querySelector('.selected')?.classList.remove('selected');td.classList.add('selected');$('cell-address').textContent=cell.ref;$('formula-value').value=cell.formula?'='+cell.formula:cell.raw;});});
+  $('sheet').querySelectorAll('td[data-ref]').forEach(td=>{const cell=cellMap.get(td.dataset.ref);Object.assign(td.style,view.styles[cell.style]||{});td.addEventListener('click',()=>{$('sheet').querySelector('.selected')?.classList.remove('selected');td.classList.add('selected');$('cell-address').textContent=cell.ref;$('formula-value').value=cell.formula?'='+cell.formula:cell.raw;if(!busy)$('format-range').value=cell.ref;});});
   $('sheet-tabs').innerHTML=(project.sheets||[]).map(item=>`<button data-sheet="${escape(item.key)}" class="${item.key===selectedSheet?.key?'active':''}">${escape(item.name)}</button>`).join('');$('sheet-tabs').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.sheet));
   $('sheet-note').textContent=`原表至第 ${view.last_row} 行 · 绿色为本次拟追加 · 同组日期/批号仅首行填写`;bindInputs();markSelection();
 }
@@ -93,7 +93,7 @@ function showParameters(){
   $('calculation-values').innerHTML=values.map(([key,value])=>{const label=key.startsWith('f:')?`${key.slice(2)} 列公式`:key.startsWith('fixed:')?`固定参数 ${key.slice(6)}`:names[key]||key;return `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`;}).join('');
 }
 function clearView(){
-  sheetRequestId++;rawNext=null;$('sheet-pager').hidden=true;
+  sheetRequestId++;rawNext=null;workbookFingerprint=null;$('format-panel').open=false;$('format-form').reset();$('format-status').textContent='未选择的格式保持原样。';$('sheet-pager').hidden=true;
   method=null;baseView=null;rows=[];undo=[];anchor=null;selection=null;invalidate();
   $('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('parameters').textContent='';$('calculation-details').hidden=true;
   $('sheet-panel').hidden=true;$('method-choice').hidden=true;document.querySelectorAll('.calc-only').forEach(el=>el.hidden=true);
@@ -118,7 +118,7 @@ async function selectSheet(key,start=1,methodKey){
     const path=editable?`/api/sheet/${encodeURIComponent(code)}/${encodeURIComponent(method.key)}`:`/api/book-sheet/${encodeURIComponent(code)}/${encodeURIComponent(key)}?start=${start}`;
     const data=await api(path);
     if(busy||requestId!==sheetRequestId||project?.code!==code||selectedSheet?.key!==key||catalogInfo.active_month!==month)return;
-    nextRow=data.next_row||4;baseView=data.view;sheet(baseView,editable);$('sheet-panel').hidden=false;
+    nextRow=data.next_row||4;workbookFingerprint=data.fingerprint||null;baseView=data.view;sheet(baseView,editable);updateFormatState();$('sheet-panel').hidden=false;
     $('sheet-status').textContent=editable?'工作副本 · 黄色单元格可录入':'工作簿只读浏览';
     if(data.view.columns_truncated){$('browse-note').hidden=false;$('browse-note').textContent+=' · 页面最多显示前200列，完整内容可下载工作簿查看。';}
     rawNext=data.view.next_row||null;$('sheet-pager').hidden=editable;
@@ -130,6 +130,8 @@ async function selectProject(code,sheetKey){
   if(busy)return;project=catalog.find(item=>item.code===code);selectedSheet=null;clearView();
   document.querySelectorAll('#projects button').forEach(button=>button.classList.toggle('active',button.dataset.code===code));
   $('project-select').value=project?.code||'';$('rules-project-name').textContent=project?.name||'';
+  $('write-target').hidden=!project;$('write-receipt').hidden=true;$('write-target-path').textContent=project?.workbook_path||'尚未获取工作副本路径';
+  renderSource();
   $('rules-panel').hidden=!project;$('download-workbook').hidden=!project;
   if(project)$('download-workbook').href='/api/workbook/'+encodeURIComponent(project.code)+'/download?month='+encodeURIComponent(selectedMonth);
   if(!project){$('methods').innerHTML='';$('title').textContent='请导入项目工作簿';$('breadcrumb').textContent='工作簿';$('import-panel').open=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
@@ -139,6 +141,61 @@ async function selectProject(code,sheetKey){
   renderRules();const first=project.sheets.find(item=>item.key===sheetKey)||project.sheets[0];
   if(first)await selectSheet(first.key);else{$('title').textContent=project.name;message('此工作簿没有可显示的工作表。');}
 }
+function showWriteReceipt(data){
+  const path=data.workbook_path||project?.workbook_path||'',written=data.rows||[],sync=data.source_sync;const synced=sync?.state==='synced'?`；已同步原文件：${sync.path}`:'；仅写入工作副本，未关联原文件';
+  $('write-receipt-text').textContent=`已写入：${path} · ${data.sheet||selectedSheet?.name||''}${written.length?` · 第 ${written[0]}–${written.at(-1)} 行`:''}${synced}`;
+  $('write-receipt-download').href=data.download||$('download-workbook').href;$('write-receipt').hidden=false;
+}
+function renderSource(){
+  const link=project?.source_link;
+  $('source-panel').hidden=!project;$('source-project-name').textContent=project?.name||'';
+  $('source-path').value=link?.path||'';$('source-path').disabled=busy||!writable();
+  $('source-link').disabled=busy||!project||!writable();$('source-unlink').disabled=busy||!link||!writable();
+  $('source-status').textContent=link?`已关联：${link.path}。下次确认写入同步当前月份整本工作簿。`:'尚未关联；写入仅保存到服务器工作副本。';
+  $('write-target-note').textContent=link?`确认写入将同步原文件：${link.path}`:'未关联原文件；仅修改服务器工作副本。';
+}
+async function setSource(path){
+  if(busy||!project||!writable())return;
+  const code=project.code;
+  const ok=await exclusive(async()=>{await api('/api/workbook/'+encodeURIComponent(code)+'/source',{path});await loadCatalog();});
+  if(ok){project=catalog.find(item=>item.code===code);renderSource();message(path?'原文件已关联，尚未改动原文件。旧预览已失效，请重新计算后确认写入。':'已解除原文件关联，后续仅写入工作副本。请重新生成预览。',true);}
+}
+$('source-form').onsubmit=event=>{event.preventDefault();const path=$('source-path').value.trim();if(!path){message('请填写服务器本机的 .xlsx 文件完整路径。');return;}return setSource(path);};
+$('source-unlink').onclick=()=>setSource(null);
+function updateFormatState(){
+  const disabled=busy||!writable()||!workbookFingerprint;
+  $('format-form').querySelectorAll('input,select,button').forEach(input=>input.disabled=disabled);
+  $('format-decimals').disabled=disabled||!['number','percent'].includes($('format-number').value);
+  $('format-text-color').disabled=disabled||!$('format-text-enabled').checked;
+  $('format-fill-color').disabled=disabled||!$('format-fill-enabled').checked;
+  $('format-save').disabled=disabled;
+  if(!writable())$('format-status').textContent='历史月份只读，不能修改格式。';
+}
+for(const id of ['format-number','format-text-enabled','format-fill-enabled'])$(id).onchange=updateFormatState;
+function formatRequest(){
+  const range=$('format-range').value.trim().toUpperCase();
+  if(!/^[A-Z]{1,3}[1-9][0-9]{0,6}(:[A-Z]{1,3}[1-9][0-9]{0,6})?$/.test(range))throw Error('请输入单元格或范围，例如 A1 或 A1:F10。');
+  const request={sheet:selectedSheet.name,range,fingerprint:workbookFingerprint},type=$('format-number').value;
+  if(type){
+    if(['number','percent'].includes(type)){const count=Number($('format-decimals').value);if(!Number.isInteger(count)||count<0||count>8)throw Error('小数位数须为0至8。');request.number_format='0'+(count?'.'+'0'.repeat(count):'')+(type==='percent'?'%':'');}
+    else request.number_format=type;
+  }
+  for(const [id,key] of [['format-font','font_name'],['format-align','alignment']])if($(id).value)request[key]=$(id).value;
+  for(const [id,key,min,max] of [['format-size','font_size',6,72],['format-width','column_width',2,100],['format-height','row_height',8,200]])if($(id).value!==''){const value=Number($(id).value);if(!Number.isFinite(value)||value<min||value>max)throw Error(key==='font_size'?'字号须为6至72磅。':key==='row_height'?'行高须为8至200磅。':'列宽须为2至100个Excel字符。');request[key]=value;}
+  if($('format-bold').value!=='')request.bold=$('format-bold').value==='true';
+  if($('format-text-enabled').checked)request.font_color=$('format-text-color').value;
+  if($('format-fill-enabled').checked)request.fill_color=$('format-fill-color').value;
+  if(Object.keys(request).length===3)throw Error('请至少选择一项要修改的格式。');
+  return request;
+}
+$('format-form').onsubmit=async event=>{
+  event.preventDefault();if(busy||!selectedSheet||!writable()||!workbookFingerprint)return;
+  let request;try{request=formatRequest();}catch(error){message(error.message);return;}
+  const key=selectedSheet.key,methodKey=method?.key,savedRows=rows.map(row=>({...row})),start=baseView?.start_row||1;
+  const ok=await exclusive(async()=>{await api('/api/workbook/'+encodeURIComponent(project.code)+'/format',request);});
+  if(ok){await selectSheet(key,start,methodKey);if(method?.key===methodKey&&savedRows.length){rows=savedRows;refresh();}$('format-status').textContent='格式已保存到工作副本。';message('格式已保存；未写入的录入数据已保留，原预览已失效，请重新计算。',true);}
+  updateFormatState();
+};
 $('method-select').onchange=()=>{if(selectedSheet)selectSheet(selectedSheet.key,1,$('method-select').value);};
 $('page-first').onclick=()=>{if(selectedSheet)selectSheet(selectedSheet.key,1);};
 $('page-next').onclick=()=>{if(selectedSheet&&rawNext)selectSheet(selectedSheet.key,rawNext);};
@@ -146,7 +203,7 @@ $('calculate').onclick=async()=>{
   if(busy||!method||!writable())return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在生成预览…';$('action-state').textContent='正在生成预览';const version=inputVersion;
   try{const payload={project:project.code,method:method.key,entries:LabGrid.entries(rows,method.fields)},data=await api('/api/preview',payload);if(version!==inputVersion)throw Error('输入已变化，请重新计算');previewId=data.id;sheet(data.view);$('results').innerHTML=data.outputs.map((o,i)=>`<div class="result-card"><small>${escape(data.entries[i].date)} · ${escape(data.entries[i].batch)} · 第 ${i+1} 行</small><strong>${escape(o.display)}</strong><span>${escape(o.unit)}</span></div>`).join('');$('results').hidden=false;$('commit').disabled=false;$('download').href=data.download;$('download').hidden=false;message(`全部 ${data.rows.length} 行${method.kind==='manual'?'已校验':'已计算'}，预览写入第 ${data.rows[0]}–${data.rows.at(-1)} 行。请核对绿色预览。`,true);$('sheet-status').textContent='预览已生成，尚未写入';$('action-state').textContent='预览已就绪 · 请确认写入';}catch(e){invalidate();message(e.message);}finally{busy=false;$('calculate').disabled=false;$('calculate').textContent=previewLabel();}
 };
-$('commit').onclick=async()=>{if(!previewId||busy||!writable())return;busy=true;writing=true;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=true);$('commit').disabled=true;try{const data=await api(`/api/commit/${previewId}`,{});message(data.message,true);const info=await api(`/api/sheet/${project.code}/${method.key}`);baseView=info.view;nextRow=info.next_row;rows=[emptyRow()];undo=[];selection=null;anchor=null;previewId=null;refresh();$('results').hidden=true;$('download').hidden=true;$('sheet-status').textContent='工作副本写入成功，可录入下一批';$('action-state').textContent='已写入 · 可继续录入';}catch(e){message(e.message);$('commit').disabled=false;}finally{busy=false;writing=false;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=false);}};
+$('commit').onclick=async()=>{if(!previewId||busy||!writable())return;$('write-receipt').hidden=true;busy=true;writing=true;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=true);$('commit').disabled=true;try{const data=await api(`/api/commit/${previewId}`,{});message(data.message,true);showWriteReceipt(data);const info=await api(`/api/sheet/${project.code}/${method.key}`);baseView=info.view;workbookFingerprint=info.fingerprint||null;nextRow=info.next_row;rows=[emptyRow()];undo=[];selection=null;anchor=null;previewId=null;refresh();$('results').hidden=true;$('download').hidden=true;$('sheet-status').textContent='工作副本写入成功，可录入下一批';$('action-state').textContent='已写入 · 可继续录入';}catch(e){message(e.message);$('commit').disabled=false;}finally{busy=false;writing=false;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=false);}};
 function addRows(newBatch=false){if(!method||busy)return;const n=Number($('add-count').value);if(!Number.isInteger(n)||n<1||rows.length+n>LabGrid.maxRows){message('新增行数须为整数，合计最多200行');return;}const seed=LabGrid.labels(rows)[selection?.r1??rows.length-1]||emptyRow();const next=rows.map(r=>({...r})),batch=newBatch?LabGrid.series([seed.batch||''],1,'batch'):seed.batch;for(let i=0;i<n;i++)next.push({date:seed.date||today(),batch:batch===seed.batch&&newBatch?'':batch,notes:'',_requireBatch:newBatch&&i===0});changed(next);select(next.length-n,'batch');$('entry').querySelector(`input[data-index="${next.length-n}"][data-key="batch"]`)?.focus();}
 $('parallel').onclick=()=>addRows(false);$('add-batch').onclick=()=>addRows(true);
 $('remove-row').onclick=()=>{if(!method||busy||!selection)return;if(rows.length-(selection.r1-selection.r0+1)<1){message('至少保留一行测定');return;}const next=LabGrid.remove(rows,selection.r0,selection.r1);selection=null;anchor=null;changed(next);};
@@ -155,7 +212,23 @@ $('sample').onclick=()=>{if(!method||busy)return;changed(rows.map((r,i)=>({...r,
 $('reset').onclick=()=>{if(busy||!method)return;selection=null;anchor=null;changed([{date:today(),batch:'',notes:''}]);};
 $('undo').onclick=()=>{if(busy||!method||!undo.length)return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();};
 $('mobile-preview').onclick=()=>{$('sheet-scroll').scrollIntoView({behavior:'smooth',block:'center'});};
-$('history-button').onclick=async()=>{try{const data=await api('/api/history');$('history').hidden=!$('history').hidden;$('history').innerHTML=`<h3>预览与写入历史</h3><table><thead><tr><th>项目 / 方法</th><th>批号</th><th>结果</th><th>目标行</th><th>状态</th></tr></thead><tbody>${data.map(r=>`<tr><td>${escape(r.request.project)} / ${escape(r.request.method)}</td><td>${escape([...new Set(r.request.entries?.map(e=>e.batch)||[r.request.batch])].join(' / '))}</td><td>${r.outputs.map(o=>escape(o.display)+' '+escape(o.unit)).join(' / ')}</td><td>${r.rows[0]}–${r.rows.at(-1)}</td><td>${r.state==='done'?'已写入':r.state==='writing'?'写入待恢复':'仅预览'}</td></tr>`).join('')}</tbody></table>`;}catch(e){message(e.message);}};
+async function loadHistory(show=true){
+  const data=await api('/api/history');$('history').hidden=!show;
+  $('history').innerHTML=`<h3>预览与写入历史</h3><table><thead><tr><th>项目 / 方法</th><th>批号</th><th>结果</th><th>目标行</th><th>状态</th></tr></thead><tbody>${data.map(r=>`<tr><td>${escape(r.request.project)} / ${escape(r.request.method)}</td><td>${escape([...new Set(r.request.entries?.map(e=>e.batch)||[r.request.batch])].join(' / '))}</td><td>${r.outputs.map(o=>escape(o.display)+' '+escape(o.unit)).join(' / ')}</td><td>${r.rows[0]}–${r.rows.at(-1)}</td><td>${r.state==='done'?'已写入':r.state==='writing'?`待完成写入 <button class="retry-write" data-id="${escape(r.id)}" ${!writable()?'disabled':''}>重试完成写入</button>`:'仅预览'}</td></tr>`).join('')}</tbody></table>`;
+  $('history').querySelectorAll('.retry-write').forEach(button=>button.onclick=()=>retryWrite(button.dataset.id));
+}
+async function retryWrite(id){
+  if(busy||!writable())return;
+  $('write-receipt').hidden=true;let result;
+  const code=project?.code,key=selectedSheet?.key,methodKey=method?.key,savedRows=rows.map(row=>({...row})),start=baseView?.start_row||1;
+  const ok=await exclusive(async()=>{result=await api('/api/commit/'+encodeURIComponent(id),{});});
+  if(!ok)return;
+  showWriteReceipt(result);
+  if(project?.code===code&&selectedSheet?.key===key&&result.sheet===selectedSheet?.name){await selectSheet(key,start,methodKey);if(method?.key===methodKey&&savedRows.length){rows=savedRows;refresh();}}
+  message(result.message||'写入已完成，未重复追加记录。',true);
+  try{await loadHistory(true);}catch(error){message('写入已完成，但历史刷新失败：'+error.message);}
+}
+$('history-button').onclick=async()=>{if(busy)return;try{await loadHistory($('history').hidden);}catch(error){message(error.message);}};
 function workbookStatus(){
   const code=$('project-code').value.trim();
   const exists=catalog.some(item=>item.code.toLowerCase()===code.toLowerCase());

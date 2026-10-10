@@ -77,14 +77,14 @@ mod tests {
         let old=br#"{"D006":[{"sheet":"sheet","start_row":4,"columns":["A","B"]}]}"#;
         fs::write(home.join("month-rules.json"),old).unwrap();
         assert!(saved_rules(&home).unwrap().is_empty());
-        let failure=create(&home,"2026-11").unwrap_err();assert!(failure.1.0["error"].as_str().unwrap().contains("确认"));
+        let failure=create(&home,"2026-11",None).unwrap_err();assert!(failure.1.0["error"].as_str().unwrap().contains("确认"));
         assert!(!home.join("months/2026-11").exists());
         assert_eq!(fs::read(home.join("month-rules.json")).unwrap(),old);
         fs::write(home.join("month-rules-v2.json"),old).unwrap();assert!(saved_rules(&home).unwrap().contains_key("D006"));
         fs::remove_dir_all(home).unwrap();
     }
 }
-pub fn create(home:&FsPath,month:&str)->Result<(),Error> {
+pub fn create(home:&FsPath,month:&str,app:Option<&App>)->Result<(),Error> {
     if !valid(month){return Err(error("月份格式须为YYYY-MM"));}
     let months=list(home)?;
     if months.iter().any(|m|m==month){return Ok(());}
@@ -101,8 +101,13 @@ pub fn create(home:&FsPath,month:&str)->Result<(),Error> {
         if sheets.len()!=project_rules.len()||sheets.iter().any(|s|!project_rules.iter().any(|r|&r.sheet==s)){return Err(error(format!("项目 {code} 表结构已改变，请重新确认月模板规则")));}
         generated.push((path.file_name().unwrap().to_owned(),workbook::blank_month(&bytes,project_rules).map_err(error)?));
     }
+    let plans=if let Some(app)=app{source::plan_month(app,previous,month,&generated)?}else{Vec::new()};
     let stage=home.join("months").join(format!(".new-{}",random_id()));
     fs::create_dir_all(stage.join("workbooks")).map_err(error)?;
     for (name,bytes) in generated {fs::write(stage.join("workbooks").join(name),bytes).map_err(error)?;}
-    fs::rename(stage,directory(home,month)).map_err(error)?;Ok(())
+    if let Some(app)=app {if let Err(e)=source::create_month_sources(app,&plans){return Err(e);}}
+    if let Err(e)=fs::rename(&stage,directory(home,month)){
+        if let Some(app)=app{source::rollback_month_sources(app,&plans)?;}
+        return Err(error(e));
+    }Ok(())
 }

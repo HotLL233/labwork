@@ -42,7 +42,7 @@ assert config=={'port':port,'data_dir':str(data),'lan_ip':'','access_password':'
 assert (data/'.labwork-rust-preview').is_file() and (data/'workbooks').is_dir()
 assert not list(app.glob('*.cmd'))
 assert (app/'labwork.ico').is_file()
-older=install_root/'versions'/'0.0.2-alpha.1-grid.6';older.mkdir()
+older=install_root/'versions'/'0.0.2-alpha.1-grid.7';older.mkdir()
 (older/'retain.exe').write_bytes(b'previous version sentinel')
 assert run(installer,f'/DIR={install_root}',f'/LOG={test / "reinstall.log"}')==0
 assert (older/'retain.exe').read_bytes()==b'previous version sentinel'

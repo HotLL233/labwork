@@ -21,7 +21,15 @@ auth=json.loads((repo/'runtime/auth-smoke-result.json').read_text(encoding='utf-
 if not auth or not all(auth.values()):raise RuntimeError('Login persistence regression did not pass')
 formula=json.loads((repo/'runtime/formula-smoke-result.json').read_text(encoding='utf-8'))
 if not formula.get('cases') or not all(formula.values()):raise RuntimeError('Workbook formula regression did not pass')
-ui_directory=repo/'runtime/ui-qa/grid7'
+format_checks=json.loads((repo/'runtime/format-smoke-result.json').read_text(encoding='utf-8'))
+if not format_checks or not all(format_checks.values()):raise RuntimeError('Workbook format regression did not pass')
+source_checks=json.loads((repo/'runtime/source-smoke-result.json').read_text(encoding='utf-8'))
+if (not source_checks or not all(source_checks.values())
+    or source_checks.get('commit_syncs_source_and_monthly_copy') is not True
+    or source_checks.get('cross_year_source_inheritance') is not True
+    or source_checks.get('existing_next_month_source_never_overwritten') is not True):
+    raise RuntimeError('Source synchronization regression did not pass')
+ui_directory=repo/'runtime/ui-qa/grid8'
 ui=json.loads((ui_directory/'result.json').read_text(encoding='utf-8'))
 if ui.get('ok') is not True:raise RuntimeError('Browser regression did not pass')
 generic_source=json.loads((repo/'runtime/generic-workbook-regression.json').read_text(encoding='utf-8'))
@@ -35,6 +43,7 @@ if (generic_source.get('version')!=version or generic_source.get('calculation_an
 generic={key:generic_source[key] for key in ('version','calculation_and_write_roundtrips','total_sheets','source_files_unchanged','candidate_results_readback_verified','month_formula_inputs_cleared_fixed_headers_preserved')}
 generic['workbook_count']=len(generic_source['workbooks'])
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
+branch=subprocess.check_output(['git','branch','--show-current'],cwd=repo,text=True).strip()
 release.mkdir(parents=True)
 portable=release/f'labwork-{version}-Rust-Windows-x64.zip'
 with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
@@ -47,11 +56,11 @@ with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
 with zipfile.ZipFile(portable) as z:
     if any(n.endswith(('.xlsx','.sqlite3')) for n in z.namelist()):raise RuntimeError('Business data found in portable package')
 subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-{version}-Source.zip'),commit],cwd=repo,check=True)
-for source in [root/'README.md',repo/'docs/表格修订版-grid.7.md',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json']:
+for source in [root/'README.md',repo/'docs/表格修订版-grid.8.md',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json']:
     shutil.copyfile(source,release/source.name)
 shutil.copytree(ui_directory,release/'browser-qa')
 (release/'generic-workbook-regression.json').write_text(json.dumps(generic,indent=2),encoding='utf-8')
-manifest={'version':version,'git_commit':commit,'branch':'fix/rust-grid','exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with shared access password; not a complete production platform','regression':checks,'month_regression':monthly,'auth_regression':auth,'formula_regression':formula,'generic_workbook_regression':generic,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','office_recalculation_checked':False}
+manifest={'version':version,'git_commit':commit,'branch':branch,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with shared access password; not a complete production platform','regression':checks,'month_regression':monthly,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'generic_workbook_regression':generic,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','office_recalculation_checked':False}
 (release/'发布信息.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
 (release/'SHA256SUMS.txt').write_text('\n'.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(release).as_posix()}' for p in sorted(release.rglob('*')) if p.is_file())+'\n',encoding='utf-8')
 print(json.dumps({'release':str(release),'exe_bytes':exe.stat().st_size,'zip_bytes':portable.stat().st_size},ensure_ascii=False))
