@@ -123,6 +123,52 @@ def main():
                 assert source.read_bytes() == working.read_bytes() == candidate
                 assert len([p for p in (home / 'backups').rglob('*') if p.is_file()]) == backup_count
 
+                def lost_qualified_attributes(data):
+                    output = io.BytesIO(); changed = False
+                    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+                        for name, content in server.parts(data).items():
+                            if name.endswith('.xml'):
+                                modified = content.replace(b'mc:Ignorable=', b'Ignorable=')
+                                changed |= modified != content
+                                content = modified
+                            archive.writestr(name, content)
+                    assert changed, 'Fixture must include a qualified compatibility attribute'
+                    return output.getvalue()
+
+                damaged_pending = preview('GRID10-DAMAGED-PREVIEW')
+                damaged_path = home / 'previews' / (damaged_pending['id'] + '.xlsx')
+                damaged_bytes = lost_qualified_attributes(damaged_path.read_bytes())
+                damaged_path.write_bytes(damaged_bytes)
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    snapshot = json.loads(db.execute('SELECT method_snapshot FROM previews WHERE id=?', [damaged_pending['id']]).fetchone()[0])
+                    assert snapshot['preserves_layout'] is True and snapshot['workspace_before_hash']
+                    db.execute('UPDATE previews SET after_hash=? WHERE id=?', [hashlib.sha256(damaged_bytes).hexdigest(), damaged_pending['id']])
+                assert commit(damaged_pending)[0] in (400, 409)
+                assert source.read_bytes() == working.read_bytes() == candidate
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    db.execute("UPDATE previews SET state='writing' WHERE id=?", [damaged_pending['id']])
+                working.write_bytes(damaged_bytes)
+                assert commit(damaged_pending)[0] in (400, 409)
+                assert source.read_bytes() == candidate and working.read_bytes() == damaged_bytes
+                working.write_bytes(candidate)
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    db.execute('DELETE FROM previews WHERE id=?', [damaged_pending['id']])
+                compatible = preview('GRID10-VALID-CANDIDATE')
+                candidate = server.ok('/api/download/' + compatible['id'])
+                assert commit(compatible)[0] == 200
+                assert source.read_bytes() == working.read_bytes() == candidate
+
+                damaged_source = lost_qualified_attributes(candidate)
+                source.write_bytes(damaged_source)
+                damaged_request = {'project': 'D006', 'method': 'water', 'entries': [{'date': month + '-10', 'batch': 'DAMAGED-SOURCE-REJECTED', 'measurement': {'result': '1.234'}}]}
+                assert server.api('/api/preview', damaged_request, month)[0] in (400, 409)
+                assert source.read_bytes() == damaged_source and working.read_bytes() == candidate
+                method_sheet = next(item for item in project['methods'] if item['key'] == 'water')['sheet']
+                damaged_format = {'sheet': method_sheet, 'range': 'A1', 'font_color': '#123456', 'fingerprint': hashlib.sha256(damaged_source).hexdigest()}
+                assert server.api('/api/workbook/D006/format', damaged_format, month)[0] in (400, 409)
+                assert source.read_bytes() == damaged_source and working.read_bytes() == candidate
+                source.write_bytes(candidate)
+
                 def grid9_snapshot(result, state):
                     with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
                         value = json.loads(db.execute('SELECT method_snapshot FROM previews WHERE id=?', [result['id']]).fetchone()[0])
@@ -273,7 +319,7 @@ def main():
             finally:
                 server.stop(process)
     assert fixture.read_bytes() == original
-    report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'grid9_preview_cannot_replay_format_damage': True, 'grid9_incomplete_write_only_finalize_when_both_files_already_saved': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
+    report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'damaged_source_preview_and_format_rejected_without_write': True, 'grid10_damaged_preview_and_incomplete_write_rejected': True, 'valid_grid10_preview_remains_compatible': True, 'grid9_preview_cannot_replay_format_damage': True, 'grid9_incomplete_write_only_finalize_when_both_files_already_saved': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
     (ROOT.parent / 'runtime/source-smoke-result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
 

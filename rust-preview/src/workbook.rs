@@ -80,7 +80,7 @@ pub fn format_cells(bytes:&[u8],request:&FormatRequest)->Result<Vec<u8>,String>{
     if request.alignment.as_ref().is_some_and(|s|!["left","center","right"].contains(&s.as_str())){return Err("对齐方式须为left、center或right".into());}
     if request.column_width.is_some_and(|s|!s.is_finite()||!(2.0..=100.0).contains(&s)){return Err("列宽须为2至100".into());}
     if request.row_height.is_some_and(|s|!s.is_finite()||!(8.0..=200.0).contains(&s)){return Err("行高须为8至200磅".into());}
-    let book=read(bytes)?;let path=target(&book,&request.sheet)?.clone();
+    let book=writable_book(bytes)?;let path=target(&book,&request.sheet)?.clone();
     let original=doc(&book.parts[&path])?;
     let date_columns=original.descendants().filter(|n|n.has_tag_name("c")).filter_map(|n|coord(&attr(n,"r")).ok().filter(|(r,_)|*r<=3).and_then(|(_,c)|cell_value(n,&book.strings).ok().filter(|v|v.trim()=="日期").map(|_|c))).collect::<HashSet<_>>();
     let column_styles=original.descendants().filter(|n|n.has_tag_name("col")).filter_map(|n|Some((n.attribute("min")?.parse::<u32>().ok()?,n.attribute("max")?.parse::<u32>().ok()?,n.attribute("style")?.parse::<usize>().ok()?))).collect::<Vec<_>>();
@@ -195,6 +195,21 @@ fn read(bytes:&[u8])->Result<Book,String>{
     Ok(Book{parts,strings,sheets,order,date1904})
 }
 pub fn sheet_names(bytes:&[u8])->Result<Vec<String>,String>{Ok(read(bytes)?.order)}
+fn writable_book(bytes:&[u8])->Result<Book,String>{
+    let book=read(bytes)?;
+    for (part,xml) in &book.parts{
+        if part!="xl/styles.xml"&&!book.sheets.values().any(|path|path==part){continue;}
+        let document=doc(xml)?;
+        for node in document.descendants().filter(|n|n.is_element()&&n.tag_name().namespace()==Some(MAIN)){
+            let name=node.tag_name().name();
+            let unqualified=|name:&str|node.attributes().any(|attr|attr.name()==name&&attr.namespace().is_none());
+            let broken=["Ignorable","uid","dyDescent","knownFonts"].iter().find(|attr|unqualified(attr)).copied()
+                .or_else(||if ["drawing","legacyDrawing","legacyDrawingHF","picture","pageSetup","hyperlink","oleObject","control"].contains(&name)&&unqualified("id"){Some("id")}else{None});
+            if let Some(attr)=broken{return Err(format!("原文件的 Excel 格式结构已损坏（{part}：{name}@{attr} 缺少命名空间）。请先核对数据目录 backups 中的写前备份恢复格式，并保留新增记录；本次未修改原文件"));}
+        }
+    }Ok(book)
+}
+pub fn validate_write(bytes:&[u8])->Result<(),String>{writable_book(bytes).map(|_|())}
 #[derive(Clone,serde::Serialize,serde::Deserialize)]
 pub struct MonthRule {
     pub sheet:String,
@@ -225,7 +240,7 @@ pub fn discover(bytes:&[u8])->Result<Vec<MonthRule>,String>{
 }
 pub fn blank_month(bytes:&[u8],rules:&[MonthRule])->Result<Vec<u8>,String>{
     if rules.is_empty(){return Err("请先确认至少一个工作表的清空范围".into());}
-    let book=read(bytes)?;let mut replacements=BTreeMap::new();let mut seen=HashSet::new();
+    let book=writable_book(bytes)?;let mut replacements=BTreeMap::new();let mut seen=HashSet::new();
     for rule in rules {
         let path=target(&book,&rule.sheet)?.clone();
         if !seen.insert(path.clone()){return Err("同一工作表不能重复设置清空范围".into());}
@@ -572,7 +587,7 @@ fn append_start(book:&Book,method:&Method,count:u32)->Result<u32,String>{
 }
 pub fn next_row(bytes:&[u8],method:&Method)->Result<u32,String>{append_start(&read(bytes)?,method,1)}
 pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Result<(Vec<u8>,Vec<u32>),String>{
-    let book=read(bytes)?;let path=target(&book,&method.sheet)?.clone();let d=doc(&book.parts[&path])?;
+    let book=writable_book(bytes)?;let path=target(&book,&method.sheet)?.clone();let d=doc(&book.parts[&path])?;
     let mut source_styles=BTreeMap::new();let mut values=BTreeMap::new();
     for cell in d.descendants().filter(|n|n.has_tag_name("c")){
         let reference=attr(cell,"r");let (r,_)=coord(&reference)?;let col=reference.trim_end_matches(|c:char|c.is_ascii_digit()).to_owned();let value=cell_value(cell,&book.strings)?;
@@ -681,6 +696,27 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn damaged_excel_attributes_are_readable_but_never_writable(){
+        for (sheet_attr,child,style_attr,allowed) in [
+            ("",r#"<sheetFormatPr xmlns:x14ac="urn:ac" x14ac:dyDescent="0.25"/>"#,"",true),
+            (r#"Ignorable="x14ac""#,"","",false),
+            (r#"uid="old-uid""#,"","",false),
+            ("",r#"<sheetFormatPr dyDescent="0.25"/>"#,"",false),
+            ("",r#"<drawing id="rId1"/>"#,"",false),
+            ("",r#"<hyperlinks><hyperlink ref="A1" id="rId1"/></hyperlinks>"#,"",false),
+            ("","",r#"Ignorable="x14ac""#,false),
+        ]{
+            let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
+            for (name,xml) in [
+                ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="测试" sheetId="1" r:id="r1"/></sheets></workbook>"#)),
+                ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>"#.into()),
+                ("xl/styles.xml",format!(r#"<styleSheet xmlns="{MAIN}" {style_attr}><cellXfs count="1"><xf numFmtId="0"/></cellXfs></styleSheet>"#)),
+                ("xl/worksheets/sheet1.xml",format!(r#"<worksheet xmlns="{MAIN}" {sheet_attr}>{child}<sheetData/></worksheet>"#)),
+            ]{zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(xml.as_bytes()).unwrap();}
+            let bytes=zip.finish().unwrap().into_inner();assert!(read(&bytes).is_ok());assert_eq!(validate_write(&bytes).is_ok(),allowed);
+        }
+    }
     #[test]
     fn editable_xml_preserves_qualified_attributes_and_whitespace(){
         let source=format!(r#"<x:worksheet xmlns:x="{MAIN}" xmlns:a="urn:a" xmlns:b="urn:b" a:id="first" b:id="second"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t xml:space="preserve"> </x:t></x:is><x:extLst a:id="kept"/></x:c><x:extLst/></x:row></x:sheetData></x:worksheet>"#);

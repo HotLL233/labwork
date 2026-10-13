@@ -239,6 +239,7 @@ fn commit_preview(app:&App,headers:&HeaderMap,id:&str)->Result<Json<Value>,Error
     let candidate=app.home.join("previews").join(format!("{id}.xlsx"));
     let bytes=fs::read(&candidate).map_err(error)?;
     if hash(&bytes)!=after {return Err(error("预览副本校验失败，未写入"));}
+    workbook::validate_write(&bytes).map_err(error)?;
     let backup=app.home.join("backups").join(format!("{}-{id}.xlsx",request.project));
     fs::copy(&book,&backup).map_err(error)?;
     if hash(&fs::read(&backup).map_err(error)?)!=workspace_before {return Err(error("写前备份校验失败"));}

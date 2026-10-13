@@ -1,10 +1,10 @@
-# labwork-v0.0.2-alpha.1-grid.10
+# labwork-v0.0.2-alpha.1-grid.11
 
 labwork 在实验室内网浏览器中录入、计算、预览并把结果写入服务器本机关联的 XLSX。Rust + SQLite 单服务器运行，无需独立客户端或外部数据库。中文安装器支持端口、数据目录、服务器私网 IPv4 和访问口令；默认端口18810，已有安装继续沿用配置。
 
 项目名称统一为 `labwork`，命名约定见源码 [命名规范](../docs/命名规范.md)，发布目录也附该文件。中文安装包为 `labwork-v版本号.exe`，程序为 `labwork.exe`，发布目录及安装版本目录均使用 `labwork-v版本号`。便携包为 `labwork-v版本号-Windows-x64.zip`，源码包为 `labwork-v版本号-Source.zip`。历史发布保留原名以便回退。
 
-grid.10 修复写入时重建工作表 XML 丢失限定属性、原有空单元格属性和新增行格式的问题。写入沿用原有单元格样式和行高，保留冻结窗格、固定列宽、合并、打印设置及链接；数据写入只调整必要的单元格和范围。追加日期沿用原表存储方式；主动设置日期格式时将有效 YYYYMMDD 日期转为 Excel 日期序号。已有损坏文件须先用写入前备份核对恢复，此版本不会自动推断并修复过去丢失的格式；升级后重新生成预览，旧候选不能继续覆盖文件。
+grid.11 针对回写后 Excel 仍提示修复、列宽与冻结窗格丢失的问题修订写入路径。发布门禁增加原生 Excel 普通打开与实际布局对比，浏览器预览和 XML 对比作为补充。已有损坏文件须先另存并用写入前备份核对；新版本不会自动推断并修复过去丢失的格式。升级后重新生成预览；识别到原表或候选已损坏会立即拒绝写入，保留文件待核对。本次故障另附只修正11处属性限定名、保留新增记录的恢复副本，供用户自行核对和关联，不自动修改原文件或关联。
 
 ## 关联原文件后录入
 
@@ -49,7 +49,7 @@ EF-理化/
 安装器不自动提权或修改防火墙。管理员可按实际地址与端口放行同网段，例如：
 
 ```powershell
-New-NetFirewallRule -DisplayName 'labwork-grid10-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
+New-NetFirewallRule -DisplayName 'labwork-grid11-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
 ```
 
 静默安装支持 `/PORT=18810 /DATADIR="D:\LabworkData" /LANIP=192.168.1.50 /ACCESSPASSFILE="D:\临时口令.txt"`。口令从UTF8文件读取，完成后删除临时文件，避免把口令放入命令行。便携包不包含业务工作簿或数据库，解压双击EXE启动；相对数据路径按EXE目录解析。
@@ -70,4 +70,4 @@ node tools/grid-test.cjs
 
 验收仅使用隔离文件，核对计算/手动值落入真实关联原表、原表已有数据保留、未关联写入拒绝、导入关联回滚、备份/冲突/重试、格式持久化、月份与跨年目录，以及桌面入口安装。以发布目录验收JSON为准。
 
-本版只支持四则运算、括号与单元格引用，不是完整Excel引擎；宏、复杂函数、Excel/WPS原生重算尚未验收。浏览器320/390/768/1440视口模拟不等于真实手机测试。当前使用HTTP及共享口令，适用于可信实验室内网，完整分账号权限和HTTPS尚未完成。
+本版只支持四则运算、括号与单元格引用，不是完整Excel引擎；宏、复杂函数完整重算与WPS原生打开尚未验收；Excel正常打开、列宽与冻结窗格检查以本版发布报告为准。浏览器320/390/768/1440视口模拟不等于真实手机测试。当前使用HTTP及共享口令，适用于可信实验室内网，完整分账号权限和HTTPS尚未完成。

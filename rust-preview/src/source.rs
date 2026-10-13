@@ -92,6 +92,7 @@ pub fn check(app:&App,month:&str,code:&str,snapshot:Option<&Binding>,after:&str)
     }
 }
 pub fn sync(app:&App,month:&str,code:&str,snapshot:Option<&Binding>,afterbytes:&[u8],id:&str)->Result<Value,Error>{
+    workbook::validate_write(afterbytes).map_err(error)?;
     let after=hash(afterbytes);check(app,month,code,snapshot,&after)?;
     let Some(binding)=snapshot else{return Ok(json!({"state":"unlinked"}));};
     let path=Path::new(&binding.path);let before=fs::read(path).map_err(error)?;

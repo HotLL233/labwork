@@ -38,6 +38,9 @@ if (not source_checks or not all(source_checks.values())
     or source_checks.get('server_import_and_binding_one_step') is not True
     or source_checks.get('server_import_failure_leaves_no_project_or_link') is not True
     or source_checks.get('source_only_previous_data_preserved') is not True
+    or source_checks.get('damaged_source_preview_and_format_rejected_without_write') is not True
+    or source_checks.get('grid10_damaged_preview_and_incomplete_write_rejected') is not True
+    or source_checks.get('valid_grid10_preview_remains_compatible') is not True
     or source_checks.get('grid9_preview_cannot_replay_format_damage') is not True
     or source_checks.get('grid9_incomplete_write_only_finalize_when_both_files_already_saved') is not True
     or source_checks.get('cross_year_source_inheritance') is not True
@@ -51,7 +54,14 @@ if (original_layout.get('version')!=version or original_layout.get('executable_s
     or original_layout.get('business_originals_hash_unchanged') is not True or not original_layout.get('checks')
     or not all(original_layout['checks'].values()) or original_layout.get('failures')!=[] or original_layout.get('api_errors')!=[]):
     raise RuntimeError('All-original layout preservation regression did not pass for this executable')
-ui_directory=repo/'runtime/ui-qa/grid10'
+native_excel=json.loads((repo/'runtime/native-excel-layout.json').read_text(encoding='utf-8'))
+if (native_excel.get('ok') is not True or native_excel.get('version')!=version
+    or native_excel.get('executable_sha256')!=hashlib.sha256(exe.read_bytes()).hexdigest()
+    or native_excel.get('normal_open_no_repair') is not True
+    or native_excel.get('fixed_column_widths_preserved') is not True
+    or native_excel.get('frozen_panes_preserved') is not True):
+    raise RuntimeError('Native Excel open and original layout regression did not pass for this executable')
+ui_directory=repo/'runtime/ui-qa/grid11'
 if any(path.suffix.lower() in ('.xlsx','.sqlite3') for path in ui_directory.rglob('*') if path.is_file()):raise RuntimeError('Browser evidence contains business files or a database')
 ui=json.loads((ui_directory/'result.json').read_text(encoding='utf-8'))
 if ui.get('ok') is not True or ui.get('version')!=version or ui.get('manual_source_write') is not True:raise RuntimeError('Browser regression did not pass for this version')
@@ -65,9 +75,10 @@ if (generic_source.get('version')!=version or generic_source.get('calculation_an
     raise RuntimeError('Full workbook regression did not pass')
 generic={key:generic_source[key] for key in ('version','calculation_and_write_roundtrips','total_sheets','source_files_unchanged','candidate_results_readback_verified','month_formula_inputs_cleared_fixed_headers_preserved')}
 generic['workbook_count']=len(generic_source['workbooks'])
+if subprocess.check_output(['git','status','--porcelain'],cwd=repo,text=True).strip():raise RuntimeError('Commit the reviewed release source before packaging')
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=repo,text=True).strip()
-if branch!='fix/grid10-preserve-workbook-format':raise RuntimeError('Package from the isolated grid10 branch only')
+if branch!='fix/grid11-native-excel-layout':raise RuntimeError('Package from the isolated grid11 branch only')
 release.mkdir(parents=True)
 portable=release/f'labwork-v{version}-Windows-x64.zip'
 with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
@@ -80,11 +91,11 @@ with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
 with zipfile.ZipFile(portable) as z:
     if any(n.endswith(('.xlsx','.sqlite3')) for n in z.namelist()):raise RuntimeError('Business data found in portable package')
 subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-v{version}-Source.zip'),commit],cwd=repo,check=True)
-for source in [root/'README.md',repo/'docs/表格修订版-grid.10.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
+for source in [root/'README.md',repo/'docs/表格修订版-grid.11.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
     shutil.copyfile(source,release/source.name)
 shutil.copytree(ui_directory,release/'browser-qa')
 (release/'generic-workbook-regression.json').write_text(json.dumps(generic,indent=2),encoding='utf-8')
-manifest={'project':'labwork','release_name':f'labwork-v{version}','product_name':f'labwork-v{version}','binary_name':'labwork.exe','version':version,'git_commit':commit,'branch':branch,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','office_recalculation_checked':False}
+manifest={'project':'labwork','release_name':f'labwork-v{version}','product_name':f'labwork-v{version}','binary_name':'labwork.exe','version':version,'git_commit':commit,'branch':branch,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'native_excel_layout_regression':native_excel,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','native_excel_normal_open_checked':True,'native_excel_column_widths_and_frozen_panes_checked':True,'complete_office_formula_recalculation_checked':False}
 (release/'发布信息.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
 (release/'SHA256SUMS.txt').write_text('\n'.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(release).as_posix()}' for p in sorted(release.rglob('*')) if p.is_file())+'\n',encoding='utf-8')
 print(json.dumps({'release':str(release),'exe_bytes':exe.stat().st_size,'zip_bytes':portable.stat().st_size},ensure_ascii=False))
