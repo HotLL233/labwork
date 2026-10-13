@@ -137,23 +137,46 @@ fn next_path(path:&Path,previous:&str,newmonth:&str)->Result<PathBuf,Error>{
     for (old,new) in [(format!("{old_y}{old_m}"),format!("{new_y}{new_m}")),(format!("{old_y}.{old_m}"),format!("{new_y}.{new_m}")),(actual_month,newmonth.to_string())]{name=name.replace(&old,&new);}
     Ok(project.join(year).join(month).join(name))
 }
-pub fn plan_month(app:&App,previous:&str,newmonth:&str,generated:&[(std::ffi::OsString,Vec<u8>)])->Result<Vec<NewSource>,Error>{
-    let mut plans=Vec::new();
+fn filename_period(stem:&str)->Option<(usize,String,String)>{
+    for start in (0..stem.len()).rev(){for width in [7,6]{
+        let Some(token)=stem.get(start..start+width)else{continue;};
+        let period=if width==6&&token.bytes().all(|c|c.is_ascii_digit()){format!("{}-{}",&token[..4],&token[4..])}else{token.replace('.',"-")};
+        if months::valid(&period)&&stem.as_bytes().get(start.wrapping_sub(1)).is_none_or(|c|!c.is_ascii_digit())&&stem.as_bytes().get(start+width).is_none_or(|c|!c.is_ascii_digit()){return Some((start,token.into(),period));}
+    }}None
+}
+fn safe_component(name:&str)->bool{
+    let base=name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    !name.is_empty()&&name.chars().count()<=100&&name!="."&&name!=".."&&!name.ends_with(['.',' '])&&!name.chars().any(|c|c.is_control()||"<>:\"/\\|?*".contains(c))&&!matches!(base.as_str(),"CON"|"PRN"|"AUX"|"NUL")&&!(base.len()==4&&(base.starts_with("COM")||base.starts_with("LPT"))&&base.as_bytes()[3].is_ascii_digit())
+}
+fn fallback_path(path:&Path,newmonth:&str,code:&str,name:&str)->Result<PathBuf,Error>{
+    let parent=path.parent().ok_or_else(||error("原表缺少所在目录"))?;
+    let stem=path.file_stem().and_then(|s|s.to_str()).ok_or_else(||error("原表文件名无效"))?;
+    let prefix=filename_period(stem).map(|(i,_,_)|stem[..i].trim_end_matches(['-','_','.',' '])).unwrap_or(stem);
+    let label=filename_period(name).map(|(i,_,_)|name[..i].trim_end_matches(['-','_','.',' '])).unwrap_or(name);
+    let component=if name!=code&&safe_component(label){label}else if safe_component(prefix){prefix}else{code};
+    let project=if parent.file_name().and_then(|s|s.to_str())==Some(component){parent.to_owned()}else{parent.join(component)};
+    let filename=path.file_name().and_then(|s|s.to_str()).ok_or_else(||error("原表文件名无效"))?;
+    let filename=if let Some((_,token,period))=filename_period(stem){let replacement=if token.len()==6{newmonth.replace('-',"")}else if token.contains('.') {newmonth.replace('-',".")}else{newmonth.into()};filename.replace(&token,&replacement).replace(&period,newmonth)}else{filename.into()};
+    Ok(project.join(&newmonth[..4]).join(newmonth.replace('-',".")).join(filename))
+}
+pub fn plan_month(app:&App,previous:&str,newmonth:&str,generated:&[(std::ffi::OsString,Vec<u8>)],bindings:&BTreeMap<String,Binding>)->Result<(Vec<NewSource>,Vec<String>),Error>{
+    let mut plans=Vec::new();let mut issues=Vec::new();let names=months::names(&app.home)?;
     for (filename,data) in generated {
         let code=Path::new(filename).file_stem().and_then(|s|s.to_str()).ok_or_else(||error("项目文件名无效"))?;
-        let Some(binding)=get(&app.db,previous,code)? else{continue;};
+        let Some(binding)=bindings.get(code) else{continue;};
         let source=local_path(&binding.path)?;external(app,&source)?;
-        if hash(&fs::read(&source).map_err(error)?)!=binding.hash{return Err(conflict(format!("{code}原表已被外部修改，请先核对关联再创建新月")));}
-        let path=next_path(&source,previous,newmonth)?;
-        if path.exists(){return Err(conflict(format!("新月原表已存在，不会覆盖：{}",path.display())));}
+        if hash(&fs::read(&source).map_err(error)?)!=binding.hash{return Err(conflict(format!("{code}原表在预览期间发生变化，请重新预览")));}
+        let path=match next_path(&source,previous,newmonth){Ok(path)=>path,Err(_)=>fallback_path(&source,newmonth,code,names.get(code).map(String::as_str).unwrap_or(code))?};
+        if path.exists(){issues.push(format!("新月原表已存在，不会覆盖：{}",display_path(&path)));}
         let mut existing=path.parent().unwrap();while !existing.exists(){existing=existing.parent().ok_or_else(||error("目标目录无效"))?;}
-        external(app,&fs::canonicalize(existing).map_err(error)?)?;
+        if !existing.is_dir(){issues.push(format!("新月目标的上级路径不是文件夹：{}",display_path(existing)));}
+        if let Err((_,body))=external(app,&fs::canonicalize(existing).map_err(error)?){issues.push(body.0["error"].as_str().unwrap_or("目标目录不可用").into());}
         let key=display_path(&path);
-        if plans.iter().any(|p:&NewSource|display_path(&p.path).eq_ignore_ascii_case(&key)){return Err(conflict("多个项目的新月原表路径相同"));}
+        if plans.iter().any(|p:&NewSource|display_path(&p.path).eq_ignore_ascii_case(&key)){issues.push("多个项目的新月原表路径相同".into());}
         let occupied:bool=app.db.query_row("SELECT EXISTS(SELECT 1 FROM source_links WHERE path=?1)",[&key],|r|r.get(0)).map_err(error)?;
-        if occupied{return Err(conflict("新月原表路径已关联其他项目或月份"));}
+        if occupied{issues.push("新月原表路径已关联其他项目或月份".into());}
         plans.push(NewSource{month:newmonth.into(),project:code.into(),path,data:data.clone()});
-    }Ok(plans)
+    }Ok((plans,issues))
 }
 pub fn create_month_sources(app:&App,plans:&[NewSource])->Result<(),Error>{
     let transaction=app.db.unchecked_transaction().map_err(error)?;let mut created=Vec::new();
@@ -185,5 +208,9 @@ mod tests {
         for (old,new) in [("EF/2026/2026.12/EF-202612.xlsx","EF/2027/2027.01/EF-202701.xlsx"),("EF/2026年/12月/报告-2026-12.xlsx","EF/2027年/01月/报告-2027-01.xlsx"),("EF/2026/12/固定.xlsx","EF/2027/01/固定.xlsx")]{assert_eq!(next_path(Path::new(old),"2026-12","2027-01").unwrap(),PathBuf::from(new));}
         assert!(next_path(Path::new("EF/2026/unknown/EF.xlsx"),"2026-12","2027-01").is_err());
         assert_eq!(next_path(Path::new("EF/2026/2026.07/EF-202607.xlsx"),"2026-10","2026-11").unwrap(),PathBuf::from("EF/2026/2026.11/EF-202611.xlsx"));
+        assert_eq!(fallback_path(Path::new("flat/K001-理化-202501.xlsx"),"2027-01","K001","K001-理化-202501").unwrap(),PathBuf::from("flat/K001-理化/2027/2027.01/K001-理化-202701.xlsx"));
+        assert_eq!(fallback_path(Path::new("flat/EF-2025.01.xlsx"),"2027-01","EF","bad/name").unwrap(),PathBuf::from("flat/EF/2027/2027.01/EF-2027.01.xlsx"));
+        assert_eq!(fallback_path(Path::new("flat/固定.xlsx"),"2027-01","EF","..\\escape").unwrap(),PathBuf::from("flat/固定/2027/2027.01/固定.xlsx"));
+        assert!(!safe_component("CON")&&!safe_component("bad:name")&&!safe_component(".."));
     }
 }

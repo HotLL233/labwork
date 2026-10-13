@@ -2,7 +2,7 @@
 const $=id=>document.getElementById(id);
 let catalog=[],catalogInfo={},selectedSheet=null,project,method,baseView,nextRow=4,rows=[],previewId=null,busy=false,writing=false,inputVersion=0,selection=null,anchor=null,drag=null,undo=[];
 let sheetRequestId=0,rawNext=null,workbookFingerprint=null;
-let monthPreview=null,monthPreviewRequest=0,monthPreviewBusy=false;
+let monthPreview=null,monthPreviewRequest=0,monthPreviewBusy=false,monthPreviewBlocked=false,monthAdjustments=[],monthSelection=null,monthAnchor=null,monthDrag=false,monthDragged=false,monthFocus={};
 let selectedMonth=sessionStorage.getItem('labwork-month')||'';
 const token=document.querySelector('meta[name="labwork-token"]').content;
 const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -84,7 +84,7 @@ function sheet(view,draft=false,target=$('sheet')){
   if(entrySheet&&draft&&method&&writable()){rows.forEach((row,i)=>{html+=`<tr class="draft-row"><td class="row-num">${nextRow+i}</td>`;view.columns.forEach(col=>{const f=fields().find(f=>method.columns[method.kind==='water_diluted'&&f.key==='result'?'raw_result':f.key]===col.label);html+=f?`<td class="edit-cell" data-index="${i}" data-key="${f.key}">${input(i,f.key)}</td>`:'<td></td>';});html+='</tr>';});}
   target.innerHTML=html+'</tbody>';
   const cellMap=new Map(view.rows.flatMap(r=>r.cells.map(c=>[c.ref,c])));
-  target.querySelectorAll('td[data-ref]').forEach(td=>{const cell=cellMap.get(td.dataset.ref);Object.assign(td.style,view.styles[cell.style]||{});td.addEventListener('click',()=>{target.querySelector('.selected')?.classList.remove('selected');td.classList.add('selected');if(entrySheet){$('cell-address').textContent=cell.ref;$('formula-value').value=cell.formula?'='+cell.formula:cell.raw;if(!busy)$('format-range').value=cell.ref;}else $('month-preview-cell').textContent=cell.ref+' · '+(cell.formula?'='+cell.formula:cell.raw);});});
+  target.querySelectorAll('td[data-ref]').forEach(td=>{const cell=cellMap.get(td.dataset.ref);Object.assign(td.style,view.styles[cell.style]||{});td.addEventListener('click',event=>{if(entrySheet){target.querySelector('.selected')?.classList.remove('selected');td.classList.add('selected');$('cell-address').textContent=cell.ref;$('formula-value').value=cell.formula?'='+cell.formula:cell.raw;if(!busy)$('format-range').value=cell.ref;}else{if(!monthDragged)selectMonthCell(cell.ref,event.shiftKey);monthDragged=false;showMonthCell(cell.ref);}});});
   if(!entrySheet)return;
   $('sheet-tabs').innerHTML=(project.sheets||[]).map(item=>`<button data-sheet="${escape(item.key)}" class="${item.key===selectedSheet?.key?'active':''}">${escape(item.name)}</button>`).join('');$('sheet-tabs').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.sheet));
   $('sheet-note').textContent=`原表至第 ${view.last_row} 行 · 绿色为本次拟追加 · 同组日期/批号仅首行填写`;bindInputs();markSelection();
@@ -134,16 +134,16 @@ async function selectSheet(key,start=1,methodKey,draftRows){
 async function selectProject(code,sheetKey,methodKey,draftRows){
   if(busy)return;project=catalog.find(item=>item.code===code);selectedSheet=null;clearView();
   document.querySelectorAll('#projects button').forEach(button=>button.classList.toggle('active',button.dataset.code===code));
-  $('project-select').value=project?.code||'';$('project-select').disabled=!catalog.length;$('sheet-select').disabled=!project;$('rules-project-name').textContent=project?.name||'';
+  $('project-select').value=project?.code||'';$('project-select').disabled=!catalog.length;$('sheet-select').disabled=!project;
   $('write-target').hidden=!project;$('write-receipt').hidden=true;$('write-target-path').textContent=project?.workbook_path||'尚未获取工作副本路径';
   renderSource();
-  $('rules-panel').hidden=!project;$('download-workbook').hidden=!project;
+  $('download-workbook').hidden=!project;
   if(project)$('download-workbook').href='/api/workbook/'+encodeURIComponent(project.code)+'/download?month='+encodeURIComponent(selectedMonth);
   if(!project){$('methods').innerHTML='';$('title').textContent='请关联服务器工作簿';$('breadcrumb').textContent='工作簿';$('browse-note').hidden=true;$('import-panel').open=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
   $('methods').innerHTML=(project.sheets||[]).map(item=>`<button data-key="${escape(item.key)}">${escape(item.name)}</button>`).join('');
   $('sheet-select').innerHTML=project.sheets.map(item=>`<option value="${escape(item.key)}">${escape(item.name)}</option>`).join('');
   $('methods').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.key));
-  renderRules();const first=project.sheets.find(item=>item.key===sheetKey)||project.sheets[0];
+  const first=project.sheets.find(item=>item.key===sheetKey)||project.sheets[0];
   if(project.source_error){selectedSheet=first||null;$('title').textContent=project.name;showWorkspace('manage');message('关联原文件暂不可用：'+project.source_error+'。请在当前项目关联入口核对或重新指定路径。');return;}
   if(first)await selectSheet(first.key,1,methodKey,draftRows);else{$('title').textContent=project.name;message('此工作簿没有可显示的工作表。');}
 }
@@ -293,7 +293,7 @@ async function exclusive(action){
   const controls=[...document.querySelectorAll('button,input,select')].map(el=>[el,el.disabled]);
   controls.forEach(([el])=>el.disabled=true);
   try{await action();return true;}catch(e){message(e.message);return false;}
-  finally{busy=false;writing=false;controls.forEach(([el,disabled])=>el.disabled=disabled);workbookStatus();renderSource();$('month-preview-confirm').disabled=!monthPreview;}
+  finally{busy=false;writing=false;controls.forEach(([el,disabled])=>el.disabled=disabled);workbookStatus();renderSource();$('month-preview-confirm').disabled=monthPreviewBusy||monthPreviewBlocked||monthPreview?.can_create!==true;}
 }
 $('import-form').onsubmit=async event=>{
   event.preventDefault();if(busy||!writable())return;
@@ -308,76 +308,123 @@ $('import-form').onsubmit=async event=>{
   });
   if(ok){$('import-panel').open=false;await selectProject(code);showWorkspace('entry');message('副本已上传，工作表目录已生成；请点击“关联原文件”后再确认写入。',true);}
 };
-function renderRules(){
-  const stored=project.monthly_rules||catalogInfo.monthly_rules?.[project.code]||[];
-  $('month-rules').innerHTML='<table><thead><tr><th>工作表</th><th>数据起始行</th><th>清空输入列</th><th>确认</th></tr></thead><tbody>'+project.sheets.map((item,index)=>{
-    const rule=stored.find(rule=>rule.sheet===item.name)||{};
-    return `<tr data-rule="${index}"><td>${escape(item.name)}</td><td><input aria-label="${escape(item.name)} 数据起始行" type="number" min="3" max="1048576" data-rule-start value="${rule.start_row||''}" placeholder="例如 4"></td><td><input aria-label="${escape(item.name)} 清空输入列" data-rule-columns value="${escape((rule.columns||[]).join(','))}" placeholder="留空则整表保留"></td><td><input type="checkbox" data-rule-confirm aria-label="确认 ${escape(item.name)} 规则" ${project.rules_confirmed?'checked':''}></td></tr>`;
-  }).join('')+'</tbody></table>';
-  $('save-rules').disabled=!writable();$('month-rules').querySelectorAll('input').forEach(input=>input.disabled=!writable());
-}
-$('save-rules').onclick=async()=>{
-  if(!project||busy||!writable())return;
-  const rules=[];
-  for(const row of $('month-rules').querySelectorAll('[data-rule]')){
-    if(!row.querySelector('[data-rule-confirm]').checked){message('请核对并勾选每个工作表的规则；未确认时不会生成空白月模板。');return;}
-    const start=Number(row.querySelector('[data-rule-start]').value),columns=row.querySelector('[data-rule-columns]').value.toUpperCase().split(/[,，\s]+/).filter(Boolean);
-    if(!Number.isInteger(start)||start<3||start>1048576||columns.some(column=>!/^([A-Z]{1,3})$/.test(column))){message('起始行须为第3行或之后，清空列填写字母（例如 A,B,C）；留空保留整表。');return;}
-    rules.push({sheet:project.sheets[+row.dataset.rule].name,start_row:start,columns:[...new Set(columns)]});
-  }
-  const code=project.code;
-  if(await exclusive(async()=>{await api('/api/month-rules/'+encodeURIComponent(code),{rules});await loadCatalog();})){project=catalog.find(item=>item.code===code);renderRules();message('月模板规则已确认保存。',true);}
-};
 async function changeMonth(month){
   const code=project?.code,key=selectedSheet?.key;
   if(await exclusive(async()=>{const result=await api('/api/month',{month});selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();})){await selectProject(catalog.some(item=>item.code===code)?code:catalog[0]?.code,key);message('已切换至 '+catalogInfo.active_month,true);}
   else $('month-select').value=catalogInfo.active_month;
 }
 $('month-select').onchange=()=>changeMonth($('month-select').value);
-function invalidateMonthPreview(close=false){
-  monthPreview=null;monthPreviewRequest++;monthPreviewBusy=false;$('month-preview-confirm').disabled=true;
+function invalidateMonthPreview(close=false,reset=true){
+  monthPreview=null;monthPreviewRequest++;monthPreviewBusy=false;monthPreviewBlocked=false;$('month-preview-confirm').disabled=true;
+  if(reset){monthAdjustments=[];monthSelection=null;monthAnchor=null;monthFocus={};$('month-preview-mode').value='candidate';}
   if(close&&$('month-preview').open)$('month-preview').close();
+}
+function monthPoint(ref){const match=/^([A-Z]+)([1-9][0-9]*)$/.exec(ref);return match?{ref,row:+match[2],col:[...match[1]].reduce((value,char)=>value*26+char.charCodeAt(0)-64,0)}:null;}
+function selectMonthCell(ref,extend=false){
+  const point=monthPoint(ref);if(!point||!monthPreview||monthPreviewBusy)return;
+  if(!extend||!monthAnchor)monthAnchor=point;
+  monthSelection={r0:Math.min(monthAnchor.row,point.row),r1:Math.max(monthAnchor.row,point.row),c0:Math.min(monthAnchor.col,point.col),c1:Math.max(monthAnchor.col,point.col)};
+  const first=(monthAnchor.col<=point.col?monthAnchor.ref:point.ref).replace(/\d+$/,'')+monthSelection.r0,last=(monthAnchor.col>=point.col?monthAnchor.ref:point.ref).replace(/\d+$/,'')+monthSelection.r1;
+  $('month-preview-range').value=first===last?first:first+':'+last;
+  markMonthSelection();
+}
+function markMonthSelection(){
+  $('month-preview-sheet').querySelectorAll('td[data-ref]').forEach(td=>{const point=monthPoint(td.dataset.ref);td.classList.toggle('template-selected',!!monthSelection&&point.row>=monthSelection.r0&&point.row<=monthSelection.r1&&point.col>=monthSelection.c0&&point.col<=monthSelection.c1);});
+}
+function showMonthCell(ref){
+  if(!monthPreview)return;
+  const original=monthPreview.original_view.rows.flatMap(row=>row.cells).find(cell=>cell.ref===ref),candidate=monthPreview.view.rows.flatMap(row=>row.cells).find(cell=>cell.ref===ref);
+  const value=cell=>cell?.formula?'='+cell.formula:cell?.value||'（空白）';
+  $('month-preview-cell').textContent=`${ref} · 原值：${value(original)} → 新模板：${value(candidate)}`;
+}
+function renderMonthTemplate(){
+  if(!monthPreview)return;
+  const original=$('month-preview-mode').value==='original';
+  sheet(original?monthPreview.original_view:monthPreview.view,false,$('month-preview-sheet'));
+  const before=new Map(monthPreview.original_view.rows.flatMap(row=>row.cells).map(cell=>[cell.ref,cell]));
+  const cleared=new Set(monthPreview.view.rows.flatMap(row=>row.cells).filter(cell=>!cell.formula&&before.get(cell.ref)?.raw!==cell.raw).map(cell=>cell.ref));
+  $('month-preview-sheet').querySelectorAll('td[data-ref]').forEach(td=>{td.classList.toggle('cleared-cell',cleared.has(td.dataset.ref));if(cleared.has(td.dataset.ref))td.title+=` · 原值：${before.get(td.dataset.ref)?.value||'（空白）'}；新模板已清空`;});
+  $('month-preview-comparison').textContent=`${original?'查看原表':'查看新模板'} · 本页 ${cleared.size} 个有值单元格已清空（绿色）；表头、格式与公式保留。`;
+  markMonthSelection();
 }
 async function loadMonthPreview(code,sheetName,start=1){
   const month=$('new-month').value;if(busy)return;
   if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)){message('请选择有效月份。');return;}
+  const previous=monthPreview,previousFocus=monthFocus;
   const requestId=++monthPreviewRequest;monthPreview=null;monthPreviewBusy=true;
   if(!$('month-preview').open)$('month-preview').showModal();
   $('month-preview-title').textContent=`${month} 空白模板预览`;
   $('month-preview-status').textContent='正在生成空白模板预览…';$('month-preview-status').className='notice';
-  $('month-preview-project').innerHTML='';$('month-preview-sheet-select').innerHTML='';$('month-preview-target').textContent='';$('month-preview-page').textContent='';
-  $('month-preview-sheet').innerHTML='';$('month-preview-cell').textContent='点击单元格查看内容或保留的公式';
-  for(const id of ['month-preview-project','month-preview-sheet-select','month-preview-first','month-preview-next','month-preview-confirm'])$(id).disabled=true;
+  $('month-preview-retry').hidden=true;
+  if(!previous){$('month-preview-issues').hidden=true;$('month-preview-issues').textContent='';$('month-preview-sheet-state').textContent='';$('month-preview-comparison').textContent='';}
+  if(!previous){$('month-preview-project').innerHTML='';$('month-preview-sheet-select').innerHTML='';$('month-preview-target').textContent='';$('month-preview-page').textContent='';$('month-preview-sheet').innerHTML='';}
+  $('month-preview-cell').textContent='点击单元格对比原值与新模板；Shift＋点击或拖动可选择区域';
+  if(monthFocus.code!==code||monthFocus.sheet!==sheetName){monthSelection=null;monthAnchor=null;$('month-preview-range').value='';}
+  monthFocus={code,sheet:sheetName,start};
+  for(const id of ['month-preview-project','month-preview-sheet-select','month-preview-first','month-preview-next','month-preview-confirm','month-preview-range','month-preview-clear','month-preview-keep','month-preview-undo','month-preview-mode'])$(id).disabled=true;
   try{
-    const data=await api('/api/month/preview',{month,...(code?{project:code}:{}),...(sheetName?{sheet:sheetName}:{}),start});
+    const data=await api('/api/month/preview',{month,...(code?{project:code}:{}),...(sheetName?{sheet:sheetName}:{}),start,adjustments:monthAdjustments});
     if(requestId!==monthPreviewRequest||month!==$('new-month').value)return;
-    monthPreview=data;
+    monthPreview=data;monthPreviewBlocked=false;monthAdjustments=(data.adjustments||monthAdjustments).map(item=>({...item}));monthFocus={code:data.project,sheet:data.sheet,start:data.view.start_row||start};
     $('month-preview-title').textContent=`${data.month} 空白模板预览`;
-    $('month-preview-status').textContent=`继承 ${data.previous} · ${data.projects.length} 个项目；按已确认规则清空输入，保留表头、格式、公式和固定参数。预览尚未创建月份或写入文件。`;
+    $('month-preview-status').textContent=`继承 ${data.previous} · ${data.projects.length} 个项目；已自动生成空白候选，未识别的数据表保留原样。核对表格后确认；预览不会写入文件。`;
     $('month-preview-project').innerHTML=data.projects.map(item=>`<option value="${escape(item.code)}" ${item.code===data.project?'selected':''}>${escape(item.name)} · ${escape(item.code)}</option>`).join('');
     const item=data.projects.find(item=>item.code===data.project);
     $('month-preview-sheet-select').innerHTML=(item?.sheets||[]).map(name=>`<option value="${escape(name)}" ${name===data.sheet?'selected':''}>${escape(name)}</option>`).join('');
-    $('month-preview-target').textContent=item?.source_path?'新月份原文件：'+item.source_path:'此项目尚未关联原文件；新月份仅生成平台工作簿副本。';
-    sheet(data.view,false,$('month-preview-sheet'));
+    $('month-preview-target').textContent=item?.source_path?'新月份原文件：'+item.source_path:catalog.find(project=>project.code===data.project)?.source_link?'原文件已关联；新月份目标路径需核对，请查看下方提示。':'此项目尚未关联原文件；新月份仅生成平台工作簿副本。';
+    const state=item?.sheet_states?.find(item=>item.sheet===data.sheet);
+    const directory=data.sheet.trim()==='目录';
+    $('month-preview-sheet-state').textContent=directory?'目录完整保留。':state?.message||(state?.state==='keep'?'此表未识别出检测数据区，默认完整保留。':'已自动识别检测数据区并清空输入。');
+    $('month-preview-sheet-state').className=state?.state==='keep'?'notice preserved-sheet':'card-note';
+    $('month-preview-issues').textContent=(data.issues||[]).join('；');$('month-preview-issues').hidden=!data.issues?.length;
+    renderMonthTemplate();
     $('month-preview-page').textContent=`第 ${data.view.start_row||start} 行起${data.view.truncated?' · 分页浏览':''}${data.view.columns_truncated?' · 前200列':''}`;
     $('month-preview-first').disabled=(data.view.start_row||start)===1;$('month-preview-next').disabled=!data.view.next_row;
-    $('month-preview-project').disabled=false;$('month-preview-sheet-select').disabled=false;$('month-preview-confirm').disabled=false;
-  }catch(error){if(requestId===monthPreviewRequest){invalidateMonthPreview();$('month-preview-status').textContent=error.message+'；请核对规则后重新预览。';$('month-preview-status').className='notice preview-error';}}
+    for(const id of ['month-preview-project','month-preview-sheet-select','month-preview-range','month-preview-clear','month-preview-keep','month-preview-mode'])$(id).disabled=false;
+    $('month-preview-clear').disabled=directory;$('month-preview-keep').disabled=directory;
+    $('month-preview-undo').disabled=!monthAdjustments.length;$('month-preview-confirm').disabled=data.can_create!==true;
+    $('month-preview-retry').hidden=data.can_create===true;$('month-preview-retry').disabled=false;
+    return true;
+  }catch(error){if(requestId===monthPreviewRequest){
+    monthPreview=previous;monthPreviewBlocked=true;
+    if(previous){monthFocus=previousFocus;monthAdjustments=(previous.adjustments||[]).map(item=>({...item}));$('month-preview-project').value=previous.project;$('month-preview-sheet-select').value=previous.sheet;for(const id of ['month-preview-project','month-preview-sheet-select','month-preview-range','month-preview-clear','month-preview-keep','month-preview-mode'])$(id).disabled=false;$('month-preview-clear').disabled=previous.sheet.trim()==='目录';$('month-preview-keep').disabled=previous.sheet.trim()==='目录';}
+    $('month-preview-status').textContent=error.message+(previous?'；已保留上次有效预览，失败的调整未保存。':'')+' 请核对后重新预览。';$('month-preview-status').className='notice preview-error';$('month-preview-retry').hidden=false;$('month-preview-retry').disabled=false;$('month-preview-undo').disabled=!monthAdjustments.length;
+  }return false;}
   finally{if(requestId===monthPreviewRequest)monthPreviewBusy=false;}
 }
 $('new-month').addEventListener('input',()=>invalidateMonthPreview(true));
-$('month-rules').addEventListener('input',()=>invalidateMonthPreview(true));
-$('create-month').onclick=()=>loadMonthPreview();
+$('create-month').onclick=()=>{invalidateMonthPreview();return loadMonthPreview(project?.code,selectedSheet?.name);};
 $('month-preview-project').onchange=()=>loadMonthPreview($('month-preview-project').value);
 $('month-preview-sheet-select').onchange=()=>loadMonthPreview($('month-preview-project').value,$('month-preview-sheet-select').value);
-$('month-preview-first').onclick=()=>{if(monthPreview&&!monthPreviewBusy)loadMonthPreview(monthPreview.project,monthPreview.sheet,1);};
-$('month-preview-next').onclick=()=>{if(monthPreview?.view.next_row&&!monthPreviewBusy)loadMonthPreview(monthPreview.project,monthPreview.sheet,monthPreview.view.next_row);};
+$('month-preview-first').onclick=()=>{if(monthPreview&&!monthPreviewBusy)return loadMonthPreview(monthPreview.project,monthPreview.sheet,1);};
+$('month-preview-next').onclick=()=>{if(monthPreview?.view.next_row&&!monthPreviewBusy)return loadMonthPreview(monthPreview.project,monthPreview.sheet,monthPreview.view.next_row);};
+$('month-preview-mode').onchange=renderMonthTemplate;
+$('month-preview-retry').onclick=()=>loadMonthPreview(monthFocus.code,monthFocus.sheet,monthFocus.start||1);
+async function adjustMonthTemplate(operation){
+  if(monthPreviewBusy||!monthPreview||monthPreview.sheet.trim()==='目录')return;
+  const range=$('month-preview-range').value.trim().toUpperCase();
+  if(!/^[A-Z]{1,3}[1-9][0-9]{0,6}(:[A-Z]{1,3}[1-9][0-9]{0,6})?$/.test(range)){ $('month-preview-cell').textContent='请点击或拖选单元格，也可填写范围，例如 A4:B10。';return; }
+  if(monthAdjustments.length>=100){$('month-preview-cell').textContent='最多调整100个区域；可先撤销上一项调整。';return;}
+  monthAdjustments.push({project:monthPreview.project,sheet:monthPreview.sheet,range,operation});$('month-preview-mode').value='candidate';renderMonthTemplate();
+  return loadMonthPreview(monthFocus.code,monthFocus.sheet,monthFocus.start);
+}
+$('month-preview-clear').onclick=()=>adjustMonthTemplate('clear');$('month-preview-keep').onclick=()=>adjustMonthTemplate('keep');
+$('month-preview-undo').onclick=()=>{if(monthPreviewBusy||!monthAdjustments.length)return;monthAdjustments.pop();return loadMonthPreview(monthFocus.code,monthFocus.sheet,monthFocus.start||1);};
+$('month-preview-sheet').addEventListener('pointerdown',event=>{if(event.pointerType!=='mouse'||event.button!==0||monthPreviewBusy)return;const cell=event.target.closest('td[data-ref]');if(!cell)return;event.preventDefault();monthDrag=true;monthDragged=false;selectMonthCell(cell.dataset.ref,event.shiftKey);});
+$('month-preview-sheet').addEventListener('pointermove',event=>{if(!monthDrag||event.buttons!==1)return;const cell=event.target.closest('td[data-ref]');if(cell){monthDragged=true;selectMonthCell(cell.dataset.ref,true);showMonthCell(cell.dataset.ref);}});
+document.addEventListener('pointerup',()=>{monthDrag=false;});
 $('month-preview-close').onclick=()=>{invalidateMonthPreview(true);};
-$('month-preview').addEventListener('cancel',()=>invalidateMonthPreview());
+$('month-preview').addEventListener('cancel',event=>{if(busy){event.preventDefault();return;}invalidateMonthPreview();});
 $('month-preview-confirm').onclick=async()=>{
-  if(busy||monthPreviewBusy||!monthPreview||monthPreview.month!==$('new-month').value)return;
-  const {month,fingerprint}=monthPreview,code=project?.code;
-  const ok=await exclusive(async()=>{const result=await api('/api/month',{month,fingerprint});selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();});
-  if(ok){await selectProject(catalog.some(item=>item.code===code)?code:catalog[0]?.code);showWorkspace('manage');message('已按预览创建 '+month+'，旧月份完整保留。',true);}
+  if(busy||monthPreviewBusy||monthPreviewBlocked||!monthPreview||monthPreview.can_create!==true||monthPreview.month!==$('new-month').value)return;
+  const {month,fingerprint}=monthPreview,adjustments=monthAdjustments.map(item=>({...item})),code=project?.code;
+  busy=true;monthPreviewBusy=true;$('month-preview-confirm').disabled=true;$('month-preview-close').disabled=true;
+  for(const id of ['month-preview-project','month-preview-sheet-select','month-preview-clear','month-preview-keep','month-preview-undo','month-preview-range','month-preview-mode','month-preview-first','month-preview-next'])$(id).disabled=true;
+  let created=false;
+  try{
+    const result=await api('/api/month',{month,fingerprint,adjustments});created=true;selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);invalidateMonthPreview(true);await loadCatalog();busy=false;
+    await selectProject(catalog.some(item=>item.code===code)?code:catalog[0]?.code);showWorkspace('manage');message('已按预览创建 '+month+'，旧月份完整保留。',true);
+  }catch(error){if(created)message('月份已创建，但目录刷新失败：'+error.message+'，请刷新页面。');else{monthPreviewBlocked=true;$('month-preview-status').textContent=error.message+' 请重新预览后再确认。';$('month-preview-status').className='notice preview-error';$('month-preview-retry').hidden=false;$('month-preview-retry').disabled=false;}}
+  finally{busy=false;monthPreviewBusy=false;$('month-preview-close').disabled=false;$('month-preview-confirm').disabled=monthPreviewBlocked||monthPreview?.can_create!==true;}
 };
 (async()=>{try{await loadCatalog();await selectProject(catalog[0]?.code);}catch(e){message(e.message);}})();

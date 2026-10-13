@@ -210,23 +210,12 @@ fs.mkdirSync(output,{recursive:true});
     assert.deepEqual(fs.readFileSync(newSource),sourceBefore,'remove import leaves original untouched');
     assert.deepEqual(await (await page.request.get(base+'/api/history')).json(),historyBefore,'removing unused duplicate retains all history');
     managedCatalog=await (await page.request.get(base+'/api/catalog')).json();
-    // Confirm each actual imported workbook's inferred clearing rules through its UI.
-    for(const item of managedCatalog.projects){
-      await page.locator(`#projects button[data-code="${item.code}"]`).click();await page.locator('#nav-manage').click();
-      const rules=item.monthly_rules||managedCatalog.monthly_rules[item.code];
-      for(let index=0;index<item.sheets.length;index++){
-        const rule=rules.find(rule=>rule.sheet===item.sheets[index].name);assert(rule,'fixture must include an inferred blank-template rule');
-        await page.locator(`#month-rules tr[data-rule="${index}"] [data-rule-start]`).fill(String(rule.start_row));
-        await page.locator(`#month-rules tr[data-rule="${index}"] [data-rule-columns]`).fill(rule.columns.join(','));
-        await page.locator(`#month-rules tr[data-rule="${index}"] [data-rule-confirm]`).check();
-      }
-      const [saved]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month-rules/'+item.code)&&response.request().method()==='POST'),page.locator('#save-rules').click()]);
-      assert.equal(saved.status(),200,saved.status()===200?"":await saved.text());await page.waitForFunction(()=>document.querySelector('#message').textContent.includes('规则已确认保存'));
-    }
+    assert.equal(await page.locator('#rules-panel').count(),0,'management must not require a per-sheet rule editor');
     await page.locator('#projects button[data-code="EF"]').click();await page.locator('#nav-entry').click();await page.locator(`#methods button[data-key="${sheet.key}"]`).click();
     await page.locator('#sheet-panel').waitFor({state:'visible'});
     await page.locator('#sheet td[data-ref="C3"]').click();
-    const entryState=await page.evaluate(()=>({html:document.querySelector('#sheet').innerHTML,formula:document.querySelector('#formula-value').value,range:document.querySelector('#format-range').value,entries:[...document.querySelectorAll('#entry input')].map(input=>input.value)}));
+    // Playwright restores screenshot caret styles as style=""; ignore only that empty attribute.
+    const entryState=await page.evaluate(()=>({html:document.querySelector('#sheet').innerHTML.replaceAll(' style=""',''),formula:document.querySelector('#formula-value').value,range:document.querySelector('#format-range').value,entries:[...document.querySelectorAll('#entry input')].map(input=>input.value)}));
     await page.locator('#nav-manage').click();
     managedCatalog=await (await page.request.get(base+'/api/catalog')).json();
     const oldMonth=managedCatalog.active_month,[year,monthNumber]=oldMonth.split('-').map(Number),nextDate=new Date(Date.UTC(year,monthNumber,1)),newMonth=nextDate.toISOString().slice(0,7);
@@ -244,10 +233,33 @@ fs.mkdirSync(output,{recursive:true});
     assert(template.view.rows.some(row=>row.number<rule.start_row&&row.cells.some(cell=>cell.value)),'actual inherited headers must remain');
     assert(template.view.rows.some(row=>row.cells.some(cell=>cell.formula)),'actual inherited formulas must remain');
     assert(template.view.rows.filter(row=>row.number>=rule.start_row).every(row=>row.cells.every(cell=>!rule.columns.includes(cell.ref.replace(/[0-9]/g,''))||cell.formula||!cell.raw)),'confirmed input columns must be blank');
+    const originalDate=template.original_view.rows.flatMap(row=>row.cells).find(cell=>cell.ref==='A4');assert(originalDate?.raw,'fixture original date must be nonempty for before/after checks');
+    await page.locator('#month-preview-mode').selectOption('original');assert.equal(await page.locator('#month-preview-sheet td[data-ref="A4"]').textContent(),originalDate.value,'original comparison displays the old value');
+    await page.locator('#month-preview-mode').selectOption('candidate');assert.equal(await page.locator('#month-preview-sheet td[data-ref="A4"]').textContent(),'','automatic preview blanks date without a rules setup');
+    assert(await page.locator('#month-preview-sheet td[data-ref="A4"]').evaluate(cell=>cell.classList.contains('cleared-cell')),'cleared input is visibly marked');
+    await page.locator('#month-preview-range').fill('A4');
+    const [kept]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-keep').click()]);assert.equal(kept.status(),200);await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);assert.equal(await page.locator('#month-preview-sheet td[data-ref="A4"]').textContent(),originalDate.value,'keep restores original value');
+    await page.locator('#month-preview-range').fill('A4');
+    const [cleared]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-clear').click()]);assert.equal(cleared.status(),200);await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);assert.equal(await page.locator('#month-preview-sheet td[data-ref="A4"]').textContent(),'');
+    const validCandidateHtml=await page.locator('#month-preview-sheet').innerHTML();
+    await page.locator('#month-preview-range').fill('A1');
+    const [invalidClear]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-clear').click()]);assert.equal(invalidClear.status(),400);await page.waitForFunction(()=>document.querySelector('#month-preview-status').textContent.includes('失败的调整未保存'));
+    assert.equal(await page.locator('#month-preview-sheet').innerHTML(),validCandidateHtml,'rejected header clear retains the last valid candidate');assert(await page.locator('#month-preview-confirm').isDisabled());
+    const [retryValid]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-retry').click()]);assert.equal(retryValid.status(),200);await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);assert.equal((await retryValid.json()).adjustments.length,2,'failed adjustment must not poison the next preview');
+    // A real disposable destination conflict must keep the candidate visible and disable confirmation.
+    const conflictTarget=allTargets[0];fs.mkdirSync(path.dirname(conflictTarget),{recursive:true});fs.writeFileSync(conflictTarget,sourceBefore);
+    const [conflictedConfirm]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month')&&response.request().method()==='POST'),page.locator('#month-preview-confirm').click()]);assert.equal(conflictedConfirm.status(),409);
+    await page.waitForFunction(()=>document.querySelector('#month-preview-status').textContent.includes('重新预览'));
+    assert(await page.locator('#month-preview').isVisible(),'failed confirmation retains the dialog');assert(await page.locator('#month-preview-confirm').isDisabled());assert(await page.locator('#month-preview-retry').isVisible());assert((await page.locator('#month-preview-status').textContent()).includes('已存在'),'confirmation error appears inside the dialog');
+    const [blocked]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-retry').click()]);assert.equal(blocked.status(),200);const blockedData=await blocked.json();assert.equal(blockedData.can_create,false);await page.waitForFunction(()=>!document.querySelector('#month-preview-issues').hidden);
+    assert(await page.locator('#month-preview-confirm').isDisabled());assert(await page.locator('#month-preview-retry').isVisible(),'blocked preview must retain the refresh entry');assert((await page.locator('#month-preview-issues').textContent()).includes('已存在'));assert(await page.locator('#month-preview-sheet td[data-ref="A1"]').count(),'destination conflict still renders actual table');
+    await page.screenshot({path:path.join(output,'month-preview-blocked-1440.png'),fullPage:false});fs.unlinkSync(conflictTarget);
+    const [unblocked]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-retry').click()]);assert.equal(unblocked.status(),200);await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);
     const formulaCell=template.view.rows.flatMap(row=>row.cells).find(cell=>cell.formula);
     await page.locator(`#month-preview-sheet td[data-ref="${formulaCell.ref}"]`).click();
     assert((await page.locator('#month-preview-cell').textContent()).includes('='+formulaCell.formula),'template formulas must be inspectable');
-    assert.deepEqual(await page.evaluate(()=>({html:document.querySelector('#sheet').innerHTML,formula:document.querySelector('#formula-value').value,range:document.querySelector('#format-range').value,entries:[...document.querySelectorAll('#entry input')].map(input=>input.value)})),entryState,'template rendering and cell selection must leave entry state unchanged');
+    const entryAfterTemplate=await page.evaluate(()=>({html:document.querySelector('#sheet').innerHTML.replaceAll(' style=""',''),formula:document.querySelector('#formula-value').value,range:document.querySelector('#format-range').value,entries:[...document.querySelectorAll('#entry input')].map(input=>input.value)}));
+    assert.deepEqual(entryAfterTemplate,entryState,'template rendering and cell selection must leave entry state unchanged');
     await page.locator('.preview-scroll').evaluate(element=>element.scrollTop=0);
     for(const width of [320,390,768,1440]){
       await page.setViewportSize({width,height:width<700?844:1000});
@@ -257,11 +269,14 @@ fs.mkdirSync(output,{recursive:true});
     }
     await page.locator('#month-preview-close').click();assert(!(await page.locator('#month-preview').isVisible()));
     assert.deepEqual(filesUnder(managedCatalog.data_directory),filesBeforePreview,'cancelled preview cannot create month directories/backups/files');assert.deepEqual(fs.readFileSync(sourcePath),sourceBeforePreview,'preview cannot change current source');assert(allTargets.every(file=>!fs.existsSync(file)));
-    const [confirmedPreview]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#create-month').click()]);assert.equal(confirmedPreview.status(),200);const confirmData=await confirmedPreview.json();await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);
-    const [created]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month')&&response.request().method()==='POST'),page.locator('#month-preview-confirm').click()]);assert.equal(created.status(),200,created.status()===200?"":await created.text());assert.equal(created.request().postDataJSON().fingerprint,confirmData.fingerprint);
+    const [confirmedPreview]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#create-month').click()]);assert.equal(confirmedPreview.status(),200);await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);
+    await page.locator('#month-preview-range').fill('A4');
+    const [confirmAdjustment]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month/preview')),page.locator('#month-preview-keep').click()]);assert.equal(confirmAdjustment.status(),200);const confirmData=await confirmAdjustment.json();await page.waitForFunction(()=>!document.querySelector('#month-preview-confirm').disabled);
+    const [created]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/month')&&response.request().method()==='POST'),page.locator('#month-preview-confirm').click()]);assert.equal(created.status(),200,created.status()===200?"":await created.text());assert.equal(created.request().postDataJSON().fingerprint,confirmData.fingerprint);assert.deepEqual(created.request().postDataJSON().adjustments,confirmData.adjustments,'confirmed creation submits the exact preview adjustments');
     await page.waitForFunction(month=>document.querySelector('#month-select').value===month,newMonth);
     assert(confirmData.projects.filter(item=>item.source_path).every(item=>fs.existsSync(item.source_path)),'confirmation creates the previewed source paths');
     const createdCatalog=await (await page.request.get(base+'/api/catalog',{headers:{'X-Labwork-Month':newMonth}})).json();assert.equal(createdCatalog.active_month,newMonth);
+    const createdView=await (await page.request.get(base+'/api/book-sheet/EF/'+sheet.key,{headers:{'X-Labwork-Month':newMonth}})).json();assert.equal(createdView.view.rows.flatMap(row=>row.cells).find(cell=>cell.ref==='A4').value,originalDate.value,'confirmed original source includes the retained date');
     const createdSources=createdCatalog.projects.filter(item=>item.source_link).map(item=>[item.source_link.path,fs.readFileSync(item.source_link.path)]);
     await page.setViewportSize({width:390,height:844});await page.locator('#nav-manage').click();
     for(const item of createdCatalog.projects){
@@ -275,7 +290,7 @@ fs.mkdirSync(output,{recursive:true});
     assert.deepEqual(await (await page.request.get(base+'/api/history',{headers:{'X-Labwork-Month':oldMonth}})).json(),historyBefore,'prior month history retained');
     await page.screenshot({path:path.join(output,'empty-catalog-390.png'),fullPage:true});
     assert.deepEqual(errors,[],'browser JavaScript errors');
-    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,version:catalog.version,executable_sha256:crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),viewports:[390,320,768,1440],project:'EF',method:method.key,manual_source_write:true,checks:['login_form','responsive_no_page_overflow','mobile_selectors','separate_management','unlinked_confirm_disabled','unlinked_format_disabled','user_manually_binds_current_project','binding_no_duplicate_project','source_link_no_write','binding_retains_unsubmitted_rows','actual_source_import','actual_format_save','font_row_height_reloaded','custom_date_survives_append','unsaved_entries_preserved','format_invalidates_preview','original_target_visible','actual_preview','calculated_original_matches_preview','manual_original_matches_preview','unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','month_preview_preserves_entry_state','no_js_errors']},null,2));
+    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,version:catalog.version,executable_sha256:crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),viewports:[390,320,768,1440],project:'EF',method:method.key,manual_source_write:true,checks:['login_form','responsive_no_page_overflow','mobile_selectors','separate_management','unlinked_confirm_disabled','unlinked_format_disabled','user_manually_binds_current_project','binding_no_duplicate_project','source_link_no_write','binding_retains_unsubmitted_rows','actual_source_import','actual_format_save','font_row_height_reloaded','custom_date_survives_append','unsaved_entries_preserved','format_invalidates_preview','original_target_visible','actual_preview','calculated_original_matches_preview','manual_original_matches_preview','unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','month_preview_preserves_entry_state','no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders','no_js_errors']},null,2));
     console.log('UI smoke passed; screenshots and result.json saved.');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

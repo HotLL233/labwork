@@ -1,4 +1,4 @@
-use crate::{Method, Request, calc::{self, Values}};
+use crate::{Method, Request, MonthAdjustment, calc::{self, Values}};
 use roxmltree::{Document, Node};
 use serde_json::{Value, json};
 use std::{collections::{BTreeMap,HashSet}, io::{Cursor,Read,Write}, path::Path};
@@ -233,22 +233,46 @@ pub fn discover(bytes:&[u8])->Result<Vec<MonthRule>,String>{
         let example=d.descendants().filter(|n|n.has_tag_name("c")&&n.attribute("r")==Some(format!("{}3",letter(batch)).as_str())).filter_map(|n|cell_value(n,&book.strings).ok()).any(|v|matches!(v.trim(),"例"|"示例"|"举例"));
         // Formula dependencies identify data columns even when their top cells hold reagent parameters.
         let mut clear=(1..=end.min(40)).collect::<std::collections::BTreeSet<_>>();
-        if let Ok(method)=generic_method(&book,sheet,0){for column in method.columns.values(){clear.insert(coord(&format!("{column}1"))?.1);}}
-        rules.push(MonthRule{sheet:sheet.clone(),data_start_row:if example{4}else{3},clear_columns:clear.into_iter().map(letter).collect()});
+        let start=if example{4}else{3};
+        let Ok(method)=generic_method(&book,sheet,0)else{rules.push(MonthRule{sheet:sheet.clone(),data_start_row:start,clear_columns:Vec::new()});continue};
+        for column in method.columns.values(){clear.insert(coord(&format!("{column}1"))?.1);}
+        for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let(row,col)=coord(reference)?;if row>=start{clear.remove(&col);}}}
+        rules.push(MonthRule{sheet:sheet.clone(),data_start_row:start,clear_columns:clear.into_iter().map(letter).collect()});
     }
     Ok(rules)
 }
 pub fn blank_month(bytes:&[u8],rules:&[MonthRule])->Result<Vec<u8>,String>{
+    blank_month_adjusted(bytes,rules,&[])
+}
+pub fn validate_month_adjustments(adjustments:&[MonthAdjustment])->Result<(),String>{
+    if adjustments.len()>100{return Err("每次最多调整100个模板区域".into());}
+    let mut cells=0u64;
+    for item in adjustments{
+        if !["clear","keep"].contains(&item.operation.as_str()){return Err("模板区域操作须为clear或keep".into());}
+        let(a,b)=merge_bounds(&item.range)?;
+        cells+=(b.0-a.0+1)as u64*(b.1-a.1+1)as u64;
+        if b.1-a.1+1>200||cells>100000{return Err("模板区域调整合计最多100000个单元格，每个区域最多200列".into());}
+    }Ok(())
+}
+pub fn blank_month_adjusted(bytes:&[u8],rules:&[MonthRule],adjustments:&[MonthAdjustment])->Result<Vec<u8>,String>{
+    validate_month_adjustments(adjustments)?;
     if rules.is_empty(){return Err("请先确认至少一个工作表的清空范围".into());}
     let book=writable_book(bytes)?;let mut replacements=BTreeMap::new();let mut seen=HashSet::new();
     for rule in rules {
         let path=target(&book,&rule.sheet)?.clone();
         if !seen.insert(path.clone()){return Err("同一工作表不能重复设置清空范围".into());}
         if !(3..=1048576).contains(&rule.data_start_row){return Err("清空范围须从第3行或之后开始".into());}
-        if rule.clear_columns.is_empty(){continue;}
+        let ranges=adjustments.iter().filter(|a|a.sheet==rule.sheet).map(|a|{
+            let (start,end)=merge_bounds(&a.range)?;
+            if !["clear","keep"].contains(&a.operation.as_str()){return Err("模板区域操作须为clear或keep".into());}
+            if a.operation=="clear"&&(start.0<3||rule.sheet.trim()=="目录"){return Err("不能清空前两行表头或目录工作表".into());}
+            Ok((start,end,a.operation=="clear"))
+        }).collect::<Result<Vec<_>,String>>()?;
+        if rule.clear_columns.is_empty()&&ranges.iter().all(|(_,_,clear)|!*clear){continue;}
         if rule.sheet.trim()=="目录" {return Err("目录仅用于浏览，不能清空".into());}
         let columns=rule.clear_columns.iter().map(|c|coord(&format!("{c}1")).and_then(|(r,col)|if r==1&&letter(col)==*c{Ok(col)}else{Err("清空列必须使用A、B等大写列名".into())})).collect::<Result<HashSet<_>,String>>()?;
-        if let Ok(method)=generic_method(&book,&rule.sheet,0){for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let (row,col)=coord(reference)?;if row>=rule.data_start_row&&columns.contains(&col){return Err(format!("{}的清空范围包含固定参数{reference}，请调整起始行或列后再确认",rule.sheet));}}}}
+        let selected=|row:u32,col:u32|ranges.iter().rev().find(|(a,b,_)|a.0<=row&&row<=b.0&&a.1<=col&&col<=b.1).map(|(_,_,clear)|*clear).unwrap_or(row>=rule.data_start_row&&columns.contains(&col));
+        if let Ok(method)=generic_method(&book,&rule.sheet,0){for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let (row,col)=coord(reference)?;if selected(row,col){return Err(format!("{}的清空范围包含固定参数{reference}，请保留此单元格",rule.sheet));}}}}
         let mut root=editable_xml(&book.parts[&path])?;
         let data=root.get_mut_child("sheetData").ok_or("缺少工作表数据区")?;
         for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
@@ -256,7 +280,7 @@ pub fn blank_month(bytes:&[u8],rules:&[MonthRule])->Result<Vec<u8>,String>{
                 let (r,c)=coord(cell.attributes.get("r").ok_or("缺少单元格坐标")?)?;
                 if cell.get_child("f").is_some() {
                     cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"));
-                } else if r>=rule.data_start_row&&columns.contains(&c) {
+                } else if cell.get_child("f").is_none()&&selected(r,c) {
                     cell.attributes.remove("t");cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="is"));
                 }
             }
@@ -696,6 +720,34 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn template_regions_preserve_formulas_fixed_parameters_and_unknown_sheets(){
+        let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
+        for(name,xml)in[
+            ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="数据" sheetId="1" r:id="r1"/><sheet name="未知" sheetId="2" r:id="r2"/><sheet name="函数" sheetId="3" r:id="r3"/></sheets></workbook>"#)),
+            ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/><Relationship Id="r2" Target="worksheets/sheet2.xml"/><Relationship Id="r3" Target="worksheets/sheet3.xml"/></Relationships>"#.into()),
+            ("xl/styles.xml",format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="1"><xf numFmtId="0"/></cellXfs></styleSheet>"#)),
+            ("xl/worksheets/sheet1.xml",format!(r#"<worksheet xmlns="{MAIN}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="6" width="18" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>日期</t></is></c><c r="B1" t="inlineStr"><is><t>批号</t></is></c><c r="C1" t="inlineStr"><is><t>输入</t></is></c><c r="D1" t="inlineStr"><is><t>结果</t></is></c><c r="F1" t="inlineStr"><is><t>系数</t></is></c></row><row r="3" ht="25"><c r="C3"><v>2</v></c><c r="D3"><f>C3*$F$3</f><v>10</v></c><c r="F3"><v>5</v></c></row></sheetData></worksheet>"#)),
+            ("xl/worksheets/sheet2.xml",format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>说明</t></is></c></row><row r="3"><c r="A3"><v>7</v></c><c r="B3"><f>A3*2</f><v>14</v></c></row></sheetData></worksheet>"#)),
+            ("xl/worksheets/sheet3.xml",format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>日期</t></is></c><c r="B1" t="inlineStr"><is><t>批号</t></is></c><c r="C1" t="inlineStr"><is><t>输入</t></is></c><c r="D1" t="inlineStr"><is><t>结果</t></is></c><c r="F1" t="inlineStr"><is><t>校正常数</t></is></c></row><row r="3"><c r="C3"><v>2</v></c><c r="D3"><f>ROUND(C3*$F$3,2)</f><v>10</v></c><c r="F3"><v>5</v></c></row></sheetData></worksheet>"#)),
+        ]{zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(xml.as_bytes()).unwrap();}
+        let bytes=zip.finish().unwrap().into_inner();let rules=discover(&bytes).unwrap();
+        let source=read(&bytes).unwrap();let automatic=read(&blank_month(&bytes,&rules).unwrap()).unwrap();
+        assert_eq!(automatic.parts["xl/worksheets/sheet2.xml"],source.parts["xl/worksheets/sheet2.xml"]);
+        assert!(rules.iter().find(|r|r.sheet=="函数").unwrap().clear_columns.is_empty());
+        assert_eq!(automatic.parts["xl/worksheets/sheet3.xml"],source.parts["xl/worksheets/sheet3.xml"],"unsupported formulas must not lose fixed parameters during automatic clearing");
+        let adjustments:Vec<MonthAdjustment>=serde_json::from_value(json!([
+            {"project":"P","sheet":"未知","range":"A3:B3","operation":"clear"},
+            {"project":"P","sheet":"未知","range":"A3","operation":"keep"},
+            {"project":"P","sheet":"数据","range":"D3","operation":"keep"},
+            {"project":"P","sheet":"函数","range":"C3","operation":"clear"},
+        ])).unwrap();
+        let adjusted=read(&blank_month_adjusted(&bytes,&rules,&adjustments).unwrap()).unwrap();
+        for(path,values)in[("xl/worksheets/sheet1.xml",vec![("C3",""),("F3","5")]),("xl/worksheets/sheet2.xml",vec![("A3","7")]),("xl/worksheets/sheet3.xml",vec![("C3",""),("F3","5")])]{let d=doc(&adjusted.parts[path]).unwrap();for(reference,value)in values{let cell=d.descendants().find(|n|n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell_value(cell,&adjusted.strings).unwrap(),value);}}
+        for(path,reference,formula)in[("xl/worksheets/sheet1.xml","D3","C3*$F$3"),("xl/worksheets/sheet2.xml","B3","A3*2"),("xl/worksheets/sheet3.xml","D3","ROUND(C3*$F$3,2)")]{let d=doc(&adjusted.parts[path]).unwrap();let cell=d.descendants().find(|n|n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell.children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));assert!(cell.children().all(|n|!n.has_tag_name("v")));}
+        assert_eq!(adjusted.parts["xl/styles.xml"],source.parts["xl/styles.xml"]);
+        for range in ["A1","F3","A3:GS1000"]{let bad:Vec<MonthAdjustment>=serde_json::from_value(json!([{"project":"P","sheet":"数据","range":range,"operation":"clear"}])).unwrap();assert!(blank_month_adjusted(&bytes,&rules,&bad).is_err(),"{range}");}
+    }
     #[test]
     fn damaged_excel_attributes_are_readable_but_never_writable(){
         for (sheet_attr,child,style_attr,allowed) in [

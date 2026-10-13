@@ -51,14 +51,17 @@ def parts(data):
         return {name: archive.read(name) for name in archive.namelist()}
 
 
-def new_month(month):
-    preview = ok('/api/month/preview', {'month': month})
-    return ok('/api/month', {'month': month, 'fingerprint': preview['fingerprint']})
+def new_month(month, adjustments=None):
+    adjustments = adjustments or []
+    preview = ok('/api/month/preview', {'month': month, 'adjustments': adjustments})
+    assert preview['can_create'], preview['issues']
+    return ok('/api/month', {'month': month, 'fingerprint': preview['fingerprint'], 'adjustments': adjustments})
 
 
 def tree_snapshot(home):
+    # SQLite readers update shared-memory read marks; still check the database and WAL.
     return {str(p.relative_to(home)): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
-            for p in home.rglob('*') if p.name != '.running.lock'}
+            for p in home.rglob('*') if p.name not in ('.running.lock', 'preview.sqlite3-shm')}
 
 
 def link_copy(code, data, folder, month):
@@ -168,7 +171,11 @@ def main():
                 old_dir = home / 'months' / old / 'workbooks'
                 assert (old_dir / 'D006.xlsx').read_bytes() == migrated
                 assert len(catalog['projects']) == 1
-                assert api('/api/month', {'month': next_month})[0] == 400
+                assert api('/api/month', {'month': next_month})[0] == 409
+                automatic = ok('/api/month/preview', {'month': next_month})
+                assert automatic['can_create'] and not automatic['issues']
+                assert any(state['state'] == 'auto' for p in automatic['projects'] for state in p['sheet_states'])
+                assert not (home / 'month-rules-v2.json').exists()
                 assert not (home / 'months' / next_month).exists()
                 assert not list((home / 'months').glob('.new-*'))
                 ok('/api/workbook/EF?name=' + urllib.parse.quote('乙方理化项目'), ef)
@@ -191,6 +198,9 @@ def main():
                 preview = ok('/api/preview', {'project': 'D006', 'method': 'water', 'entries': [{'date': old + '-10', 'batch': 'OLD-PENDING', 'measurement': {'result': '1'}}]})
                 originals = {p.name: p.read_bytes() for p in old_dir.glob('*.xlsx')}
                 rules = catalog['monthly_rules']
+                without_confirmation = ok('/api/month/preview', {'month': next_month})
+                assert without_confirmation['can_create'] and not (home / 'month-rules-v2.json').exists()
+                assert any(state['state'] == 'keep' for p in without_confirmation['projects'] for state in p['sheet_states'])
                 for code in projects:
                     assert len(rules[code]) == len(projects[code]['sheets'])
                     ok('/api/month-rules/' + code, {'rules': rules[code]})
@@ -204,6 +214,21 @@ def main():
                 paged_preview = ok('/api/month/preview', {'month': next_month, 'project': 'D006', 'sheet': water['name'], 'start': 201})
                 assert paged_preview['fingerprint'] == month_preview['fingerprint']
                 assert paged_preview['view']['rows'][0]['number'] == 201
+                assert paged_preview['original_view']['rows'][0]['number'] == 201
+                def preview_cell(response, reference, original=False):
+                    return next(cell for row in response['original_view' if original else 'view']['rows'] for cell in row['cells'] if cell['ref'] == reference)
+                assert preview_cell(paged_preview, 'C250')['raw'] == ''
+                assert preview_cell(paged_preview, 'C250', True)['raw'] == '42'
+                adjustments = [{'project': 'D006', 'sheet': water['name'], 'range': 'C250', 'operation': 'keep'}]
+                kept = ok('/api/month/preview', {'month': next_month, 'project': 'D006', 'sheet': water['name'], 'start': 201, 'adjustments': adjustments})
+                assert preview_cell(kept, 'C250')['raw'] == '42' and kept['adjustments'] == adjustments
+                assert kept['fingerprint'] != month_preview['fingerprint']
+                assert api('/api/month', {'month': next_month, 'fingerprint': kept['fingerprint']})[0] == 409
+                recleared = ok('/api/month/preview', {'month': next_month, 'project': 'D006', 'sheet': water['name'], 'start': 201, 'adjustments': adjustments + [{'project': 'D006', 'sheet': water['name'], 'range': 'C250', 'operation': 'clear'}]})
+                assert preview_cell(recleared, 'C250')['raw'] == ''
+                for bad in [dict(adjustments[0], project='MISSING'), dict(adjustments[0], sheet='MISSING'), dict(adjustments[0], range='A1', operation='clear'), dict(adjustments[0], range='A3:ZZ1000', operation='clear'), dict(adjustments[0], operation='unknown')]:
+                    assert api('/api/month/preview', {'month': next_month, 'adjustments': [bad]})[0] == 400
+                assert api('/api/month/preview', {'month': next_month, 'adjustments': adjustments * 101})[0] == 400
                 assert api('/api/month/preview', {'month': next_month, 'project': 'MISSING'})[0] == 400
                 assert api('/api/month/preview', {'month': next_month, 'sheet': 'MISSING'})[0] == 400
                 assert api('/api/month/preview', {'month': next_month, 'start': 0})[0] == 400
@@ -236,8 +261,9 @@ def main():
                 assert api('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint']})[0] == 409
                 ok('/api/workbook/ADDED/remove', {})
                 assert not (home / 'months' / next_month).exists()
-                month_preview = ok('/api/month/preview', {'month': next_month})
-                ok('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint']})
+                final_adjustments = adjustments + [{'project': 'D006', 'sheet': water['name'], 'range': 'C250', 'operation': 'clear'}]
+                month_preview = ok('/api/month/preview', {'month': next_month, 'adjustments': final_adjustments})
+                ok('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint'], 'adjustments': final_adjustments})
                 new_dir = home / 'months' / next_month / 'workbooks'
                 for name, data in originals.items():
                     assert (old_dir / name).read_bytes() == data
@@ -280,8 +306,9 @@ def main():
     assert hashlib.sha256(ef_path.read_bytes()).hexdigest() == ef_hash
     assert (source / 'D006.xlsx').read_bytes() == d006
     assert (source / 'Q.xlsx').read_bytes() == q
-    result = {'version': restarted['version'], 'executable_sha256': hashlib.sha256(startup.EXE.read_bytes()).hexdigest(), 'new_month_preview_no_filesystem_writes': True, 'preview_uses_actual_blank_template_and_pagination': True, 'new_month_confirmation_requires_current_fingerprint': True, 'source_rules_catalog_changes_invalidate_month_preview': True, 'legacy_copy_preserved': True, 'dynamic_projects_and_chinese_names': True, 'all_sheets_browsable': True, 'raw_200_row_pagination': True, 'rules_required_atomic_month_creation': True, 'new_month_clears_confirmed_constants': True, 'formulas_styles_parameters_preserved': True, 'old_month_hash_unchanged': True, 'browser_local_month_selection': True, 'month_scoped_history_and_dates': True, 'month_download_matches_disk': True, 'download_rejects_invalid_months': True, 'old_month_writes_rejected': True, 'repeated_month_no_overwrite': True, 'backwards_month_rejected': True, 'restart_retains_latest': True, 'originals_unchanged': True}
+    result = {'version': restarted['version'], 'executable_sha256': hashlib.sha256(startup.EXE.read_bytes()).hexdigest(), 'no_manual_rule_confirm_required': True, 'automatic_template_rules_used': True, 'unknown_sheets_preserved_by_default': True, 'adjustments_clear_keep_and_fingerprint_checked': True, 'original_and_candidate_same_page_visible': True, 'new_month_preview_no_filesystem_writes': True, 'preview_uses_actual_blank_template_and_pagination': True, 'new_month_confirmation_requires_current_fingerprint': True, 'source_rules_catalog_changes_invalidate_month_preview': True, 'legacy_copy_preserved': True, 'dynamic_projects_and_chinese_names': True, 'all_sheets_browsable': True, 'raw_200_row_pagination': True, 'fingerprint_required_atomic_month_creation': True, 'new_month_clears_confirmed_constants': True, 'formulas_styles_parameters_preserved': True, 'old_month_hash_unchanged': True, 'browser_local_month_selection': True, 'month_scoped_history_and_dates': True, 'month_download_matches_disk': True, 'download_rejects_invalid_months': True, 'old_month_writes_rejected': True, 'repeated_month_no_overwrite': True, 'backwards_month_rejected': True, 'restart_retains_latest': True, 'originals_unchanged': True}
     print(json.dumps(result, indent=2))
+    result['limits'] = ['Preview snapshots include business files, rules, SQLite database and WAL; exclude the running lock and SQLite shared-memory reader marks.']
     (ROOT.parent / 'runtime/month-smoke-result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
 
 

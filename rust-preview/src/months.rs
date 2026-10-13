@@ -99,54 +99,62 @@ pub fn remove_project(app:&App,month:&str,code:&str)->Result<Value,Error> {
 mod tests {
     use super::*;
     #[test]
-    fn old_month_rules_require_reconfirmation_without_modifying_rollback_file(){
+    fn old_month_rules_are_ignored_without_modifying_rollback_file(){
         let home=std::env::temp_dir().join(format!("labwork-month-rules-{}",random_id()));
         fs::create_dir_all(home.join("months/2026-10/workbooks")).unwrap();
         fs::write(home.join("months/2026-10/workbooks/D006.xlsx"),b"not read until rules are confirmed").unwrap();
         let old=br#"{"D006":[{"sheet":"sheet","start_row":4,"columns":["A","B"]}]}"#;
         fs::write(home.join("month-rules.json"),old).unwrap();
         assert!(saved_rules(&home).unwrap().is_empty());
-        let failure=plan(&home,"2026-11",None).err().unwrap();assert!(failure.1.0["error"].as_str().unwrap().contains("确认"));
+        let failure=plan(&home,"2026-11",None,&[]).err().unwrap();assert!(!failure.1.0["error"].as_str().unwrap().contains("确认"));
         assert!(!home.join("months/2026-11").exists());
         assert_eq!(fs::read(home.join("month-rules.json")).unwrap(),old);
         fs::write(home.join("month-rules-v2.json"),old).unwrap();assert!(saved_rules(&home).unwrap().contains_key("D006"));
         fs::remove_dir_all(home).unwrap();
     }
 }
-pub struct PlannedProject {pub code:String,pub name:String,pub sheets:Vec<String>,pub source_path:Option<String>,pub bytes:Vec<u8>}
-pub struct Plan {pub previous:String,pub fingerprint:String,pub projects:Vec<PlannedProject>,pub sources:Vec<source::NewSource>}
-pub fn plan(home:&FsPath,month:&str,app:Option<&App>)->Result<Plan,Error> {
+pub struct PlannedProject {pub code:String,pub name:String,pub sheets:Vec<String>,pub sheet_states:Vec<Value>,pub source_path:Option<String>,pub original:Vec<u8>,pub bytes:Vec<u8>}
+pub struct Plan {pub previous:String,pub fingerprint:String,pub projects:Vec<PlannedProject>,pub sources:Vec<source::NewSource>,pub issues:Vec<String>}
+pub fn plan(home:&FsPath,month:&str,app:Option<&App>,adjustments:&[MonthAdjustment])->Result<Plan,Error> {
+    workbook::validate_month_adjustments(adjustments).map_err(error)?;
     if !valid(month){return Err(error("月份格式须为YYYY-MM"));}
     let months=list(home)?;
     if months.iter().any(|m|m==month){return Err(error("月份已存在，请直接切换查看"));}
     let previous=months.last().ok_or_else(||error("缺少上个月份"))?;
     if month<=previous.as_str(){return Err(error("只能在最新月份之后新建，已有月份可切换查看"));}
     let rules=saved_rules(home)?;let names=names(home)?;
-    let mut projects=Vec::new();let mut inputs=BTreeMap::new();
+    let mut projects=Vec::new();let mut inputs=BTreeMap::new();let mut bindings=BTreeMap::new();
     for entry in fs::read_dir(directory(home,previous).join("workbooks")).map_err(error)? {
         let path=entry.map_err(error)?.path();if path.extension().is_none_or(|e|e!="xlsx"){continue;}
         let code=path.file_stem().and_then(|s|s.to_str()).ok_or_else(||error("项目名无效"))?;
         let (bytes,binding)=if let Some(app)=app{source::read(app,previous,code)?}else{(fs::read(&path).map_err(error)?,None)};
-        let project_rules=rules.get(code).ok_or_else(||error(format!("请先在项目 {code} 确认月模板清空范围")))?;
         let sheets=workbook::sheet_names(&bytes).map_err(error)?;
-        if sheets.len()!=project_rules.len()||sheets.iter().any(|s|!project_rules.iter().any(|r|&r.sheet==s)){return Err(error(format!("项目 {code} 表结构已改变，请重新确认月模板规则")));}
+        let saved=rules.get(code).filter(|r|r.len()==sheets.len()&&sheets.iter().all(|s|r.iter().filter(|r|&r.sheet==s).count()==1));
+        let project_rules=if let Some(saved)=saved{saved.clone()}else{workbook::discover(&bytes).map_err(error)?};
+        let selected=adjustments.iter().filter(|a|a.project==code).cloned().collect::<Vec<_>>();
+        if selected.iter().any(|a|!sheets.contains(&a.sheet)){return Err(error(format!("项目 {code} 的调整工作表不存在")));}
+        let states=project_rules.iter().map(|r|{let custom=selected.iter().any(|a|a.sheet==r.sheet);let state=if custom{"custom"}else if r.clear_columns.is_empty(){"keep"}else if saved.is_some(){"saved"}else{"auto"};json!({"sheet":r.sheet,"state":state,"message":match state{"custom"=>"按所选区域调整","keep"=>"保留原表内容；可选择数据区清空","saved"=>"沿用已保存清空规则",_=>"自动清空已识别数据区"}})}).collect::<Vec<_>>();
         inputs.insert(code.to_owned(),json!({"source":hash(&bytes),"mirror":hash(&fs::read(&path).map_err(error)?),"binding":binding,"rules":project_rules}));
-        projects.push(PlannedProject{code:code.into(),name:names.get(code).cloned().unwrap_or_else(||code.into()),sheets,source_path:None,bytes:workbook::blank_month(&bytes,project_rules).map_err(error)?});
+        if let Some(binding)=binding{bindings.insert(code.to_owned(),binding);}
+        let blank=workbook::blank_month_adjusted(&bytes,&project_rules,&selected).map_err(error)?;
+        projects.push(PlannedProject{code:code.into(),name:names.get(code).cloned().unwrap_or_else(||code.into()),sheets,sheet_states:states,source_path:None,original:bytes,bytes:blank});
     }
     if projects.is_empty(){return Err(error("当前月份没有项目，请先导入工作簿"));}
     projects.sort_by(|a,b|a.code.cmp(&b.code));
+    if adjustments.iter().any(|a|!projects.iter().any(|p|p.code==a.project)){return Err(error("模板调整的项目不存在"));}
     let generated=projects.iter().map(|p|(std::ffi::OsString::from(format!("{}.xlsx",p.code)),p.bytes.clone())).collect::<Vec<_>>();
-    let sources=if let Some(app)=app{source::plan_month(app,previous,month,&generated)?}else{Vec::new()};
+    let(sources,issues)=if let Some(app)=app{source::plan_month(app,previous,month,&generated,&bindings)?}else{(Vec::new(),Vec::new())};
     for project in &mut projects {project.source_path=sources.iter().find(|p|p.project==project.code).map(|p|source::display_path(&p.path));}
     // ZIP timestamps vary per generation; validate the exact inputs and destinations instead.
     let targets=projects.iter().map(|p|json!({"code":p.code,"name":p.name,"source_path":p.source_path})).collect::<Vec<_>>();
-    let fingerprint=hash(&serde_json::to_vec(&json!({"previous":previous,"month":month,"inputs":inputs,"projects":targets})).map_err(error)?);
-    Ok(Plan{previous:previous.clone(),fingerprint,projects,sources})
+    let fingerprint=hash(&serde_json::to_vec(&json!({"previous":previous,"month":month,"inputs":inputs,"projects":targets,"adjustments":adjustments,"issues":issues})).map_err(error)?);
+    Ok(Plan{previous:previous.clone(),fingerprint,projects,sources,issues})
 }
-pub fn create(home:&FsPath,month:&str,app:&App,fingerprint:Option<&str>)->Result<(),Error> {
+pub fn create(home:&FsPath,month:&str,app:&App,fingerprint:Option<&str>,adjustments:&[MonthAdjustment])->Result<(),Error> {
     if !valid(month){return Err(error("月份格式须为YYYY-MM"));}
     if list(home)?.iter().any(|m|m==month){return Ok(());}
-    let plan=plan(home,month,Some(app))?;
+    let plan=plan(home,month,Some(app),adjustments)?;
+    if !plan.issues.is_empty(){return Err((StatusCode::CONFLICT,Json(json!({"error":plan.issues.join("；")}))));}
     if fingerprint!=Some(plan.fingerprint.as_str()){return Err((StatusCode::CONFLICT,Json(json!({"error":"请先预览新月份模板；原文件、项目或清空规则变化后须重新预览确认"}))));}
     let stage=home.join("months").join(format!(".new-{}",random_id()));
     let result=(||{

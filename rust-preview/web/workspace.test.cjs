@@ -5,11 +5,11 @@ const elements=new Map(),requests=[];
 function element(id){if(!elements.has(id))elements.set(id,{value:'',setAttribute(){},focus(){this.focused=true;},scrollIntoView(){this.scrolled=true;},showModal(){this.open=true;},close(){this.open=false;},files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
 const project={workbook_path:'C:\\Labwork\\months\\2026-10\\LAB.xlsx',code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',sheet:'水分',fields:[],params:{},columns:{}},{key:'water_diluted',name:'稀释水分',sheet:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
 const projects=[project],view={name:'原始表',columns:[],rows:[],merges:[],styles:[],sheet_names:[],last_row:3};
-let active='2026-10',writable=true,missingOnce=false,redirect,retryDone=false,allowConfirm=true,monthPreviewFails=false;
+let active='2026-10',writable=true,missingOnce=false,redirect,retryDone=false,allowConfirm=true,monthPreviewFails=false,monthTargetConflict=false,monthConfirmFails=false;
 const confirmations=[],blankView={...view,name:'水分',columns:[{label:'A',width:80},{label:'B',width:120}],rows:[{number:1,height:24,cells:[{ref:'A1',value:'检测日期',raw:'检测日期',style:0},{ref:'B1',value:'计算结果',raw:'计算结果',style:0}]},{number:4,height:24,cells:[{ref:'A4',value:'',raw:'',style:0},{ref:'B4',value:'',raw:'',formula:'A4*2',style:0}]}],start_row:1,next_row:101,styles:[{color:'rgb(255,0,0)'}]};
 const context=vm.createContext({
   console,Date,confirm(message){confirmations.push(message);return allowConfirm;},LabGrid:require('./grid.js'),sessionStorage:{getItem(){return '2026-10';},setItem(){},removeItem(){}},
-  document:{getElementById:element,querySelector(){return{content:'test-token'};},querySelectorAll(){return[];}},
+  document:{getElementById:element,querySelector(){return{content:'test-token'};},querySelectorAll(){return[];},addEventListener(){}},
   location:{assign(path){redirect=path;}},
   fetch:async(path,options)=>{requests.push({path,...options});let data;
     if(path==='/api/catalog'&&missingOnce){missingOnce=false;return{ok:false,status:400,json:async()=>({error:'月份不存在，请刷新目录'})};}
@@ -23,10 +23,10 @@ const context=vm.createContext({
     else if(path==='/api/preview'){const body=JSON.parse(options.body);data={id:'preview-id',view,entries:body.entries,rows:[7],outputs:[{display:'1.234',unit:'%'}],download:'/api/preview-download'};}
     else if(path==='/api/commit/preview-id')data={message:'已写入原文件',workbook_path:project.workbook_path,sheet:'原始表',rows:[7],source_sync:{state:'synced',path:project.source_link?.path}};
     else if(path==='/api/month/preview'){
-      if(monthPreviewFails){monthPreviewFails=false;return{ok:false,status:409,json:async()=>({error:'月模板规则尚未确认'})};}
-      const body=JSON.parse(options.body);data={month:body.month,previous:active,fingerprint:'month-fingerprint',projects:projects.map(item=>({code:item.code,name:item.name,sheets:item.sheets.map(sheet=>sheet.name),source_path:'C:/source/'+body.month+'/'+item.code+'.xlsx'})),project:body.project||projects[0].code,sheet:body.sheet||'水分',view:{...blankView,start_row:body.start,next_row:body.start===1?101:null}};
+      if(monthPreviewFails){monthPreviewFails=false;return{ok:false,status:409,json:async()=>({error:'工作簿暂时不可用'})};}
+      const body=JSON.parse(options.body),candidate={...blankView,start_row:body.start,next_row:body.start===1?101:null};data={month:body.month,previous:active,fingerprint:'month-fingerprint',projects:projects.map(item=>({code:item.code,name:item.name,sheets:item.sheets.map(sheet=>sheet.name),sheet_states:item.sheets.map(sheet=>({sheet:sheet.name,state:sheet.key==='s0'?'keep':'auto',message:sheet.key==='s0'?'未识别检测区，完整保留':'已自动清空输入'})),source_path:'C:/source/'+body.month+'/'+item.code+'.xlsx'})),project:body.project||projects[0].code,sheet:body.sheet||'水分',view:candidate,original_view:blankView,adjustments:body.adjustments,can_create:!monthTargetConflict,issues:monthTargetConflict?['新月原表已存在，不会覆盖']:[]};
     }
-    else if(path==='/api/month'){active=JSON.parse(options.body).month;writable=active>='2026-10';data={month:active};}
+    else if(path==='/api/month'){if(monthConfirmFails){monthConfirmFails=false;return{ok:false,status:409,json:async()=>({error:'原表已改变，预览过期'})};}active=JSON.parse(options.body).month;writable=active>='2026-10';data={month:active};}
     else data={fingerprint:'test-fingerprint',view,next_row:4};
     return{ok:true,status:200,json:async()=>data};
   }
@@ -157,19 +157,39 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   await element('create-month').onclick();assert.equal(element('month-preview').open,true);assert.equal(element('month-preview-confirm').disabled,false);
   assert(element('month-preview-sheet').innerHTML.includes('检测日期'));assert(element('month-preview-sheet').innerHTML.includes('A4*2'));
   assert.equal(element('sheet').innerHTML,originalSheet,'template renderer does not replace entry workbook');assert.equal(vm.runInContext('JSON.stringify(rows)',context),originalRows);assert.equal(vm.runInContext('method.key',context),originalMethod);
+  assert(!fs.readFileSync(__dirname+'/index.html','utf8').includes('id="rules-panel"'),'no management rule editor');
+  vm.runInContext("selectMonthCell('B10');selectMonthCell('A4',true)",context);assert.equal(element('month-preview-range').value,'A4:B10','reverse selection is normalized');
+  await element('month-preview-clear').onclick();assert.equal(JSON.parse(requests.at(-1).body).adjustments[0].range,'A4:B10');
+  element('month-preview-range').value='A4';await element('month-preview-keep').onclick();assert.equal(JSON.parse(requests.at(-1).body).adjustments[1].operation,'keep');
+  await element('month-preview-undo').onclick();assert.equal(JSON.parse(requests.at(-1).body).adjustments.length,1);
+  element('month-preview-mode').value='original';element('month-preview-mode').onchange();vm.runInContext("showMonthCell('B4')",context);assert(element('month-preview-cell').textContent.includes('原值：=A4*2'));assert.equal(element('sheet').innerHTML,originalSheet);
+  const candidateBeforeFailure=element('month-preview-sheet').innerHTML;monthPreviewFails=true;element('month-preview-range').value='A1';await element('month-preview-clear').onclick();
+  assert.equal(element('month-preview-sheet').innerHTML,candidateBeforeFailure,'invalid adjustment retains prior candidate');assert.equal(vm.runInContext('monthAdjustments.length',context),1,'failed adjustment rolled back');assert(element('month-preview-status').textContent.includes('失败的调整未保存'));assert.equal(element('month-preview-confirm').disabled,true);
+  await element('month-preview-retry').onclick();assert.equal(element('month-preview-confirm').disabled,false);
+  await vm.runInContext("loadMonthPreview('LAB','目录')",context);assert.equal(element('month-preview-clear').disabled,true);assert.equal(element('month-preview-keep').disabled,true);assert.equal(element('month-preview-sheet-state').textContent,'目录完整保留。');
+  await vm.runInContext("loadMonthPreview('LAB','水分')",context);
   assert.equal(requests.filter(item=>item.path==='/api/month').length,monthsBefore,'preview never creates month');
   element('month-preview-close').onclick();assert.equal(vm.runInContext('monthPreview',context),null);assert.equal(element('month-preview').open,false);assert.equal(requests.filter(item=>item.path==='/api/month').length,monthsBefore,'cancel never creates month');
+  assert.equal(vm.runInContext('monthAdjustments.length',context),0,'cancel drops session-only adjustments');
   await element('create-month').onclick();element('month-preview-project').value='NEW';await element('month-preview-project').onchange();
   assert.equal(JSON.parse(requests.at(-1).body).project,'NEW');assert.equal(vm.runInContext('monthPreview.fingerprint',context),'month-fingerprint');
+  element('month-preview-range').value='A4:B8';await element('month-preview-clear').onclick();
   element('month-preview-sheet-select').value='原始表';await element('month-preview-sheet-select').onchange();assert.equal(JSON.parse(requests.at(-1).body).sheet,'原始表');
   await element('month-preview-next').onclick();assert.equal(JSON.parse(requests.at(-1).body).start,101);assert.equal(element('month-preview-next').disabled,true);
+  assert.equal(JSON.parse(requests.at(-1).body).adjustments.length,1,'sheet/page changes retain adjustments');
+  assert(element('month-preview-sheet-state').textContent.includes('完整保留'),'unknown sheet has an explicit keep notice: '+element('month-preview-sheet-state').textContent+' '+element('month-preview-status').textContent);
+  monthTargetConflict=true;await element('month-preview-retry').onclick();assert.equal(element('month-preview-confirm').disabled,true);assert(element('month-preview-sheet').innerHTML.includes('检测日期'));assert.equal(element('month-preview-issues').hidden,false);assert(element('month-preview-issues').textContent.includes('不会覆盖'));
+  assert.equal(element('month-preview-retry').hidden,false,'blocked target retains an obvious refresh action');assert.equal(element('month-preview-retry').disabled,false);
+  await vm.runInContext('exclusive(async()=>{})',context);assert.equal(element('month-preview-confirm').disabled,true,'exclusive cannot enable blocked confirm');monthTargetConflict=false;
   element('new-month').value='2100-02';element('new-month').listeners.input();assert.equal(element('month-preview-confirm').disabled,true);assert.equal(vm.runInContext('monthPreview',context),null);
   monthPreviewFails=true;await element('create-month').onclick();assert.equal(element('month-preview-confirm').disabled,true);assert.equal(vm.runInContext('monthPreview',context),null);assert(element('month-preview-status').textContent.includes('重新预览'));
-  await element('create-month').onclick();await element('month-preview-confirm').onclick();const confirmed=requests.filter(item=>item.path==='/api/month').at(-1);assert.equal(JSON.parse(confirmed.body).fingerprint,'month-fingerprint');assert.equal(active,'2100-02');
+  await element('month-preview-retry').onclick();element('month-preview-range').value='A4';await element('month-preview-keep').onclick();
+  monthConfirmFails=true;await element('month-preview-confirm').onclick();assert.equal(element('month-preview').open,true,'stale confirm keeps dialog open');assert.equal(element('month-preview-confirm').disabled,true);assert(element('month-preview-status').textContent.includes('预览过期'));assert.equal(element('month-preview-retry').hidden,false);
+  await element('month-preview-retry').onclick();await element('month-preview-confirm').onclick();const confirmed=requests.filter(item=>item.path==='/api/month').at(-1);assert.equal(JSON.parse(confirmed.body).fingerprint,'month-fingerprint');assert.equal(JSON.parse(confirmed.body).adjustments[0].operation,'keep');assert.equal(active,'2100-02');
   await vm.runInContext("selectProject('NEW')",context);
   allowConfirm=false;requestCount=requests.length;await element('project-remove').onclick();assert.equal(requests.length,requestCount,'cancel removal sends nothing');
   allowConfirm=true;await element('project-remove').onclick();assert.equal(projects.length,1);assert.equal(vm.runInContext('project.code',context),'LAB');assert(confirmations.at(-1).includes('NEW'));assert(confirmations.at(-1).includes('2100-02'));
-  await element('project-remove').onclick();assert.equal(projects.length,0);assert.equal(vm.runInContext('project',context),undefined);assert.equal(element('source-panel').hidden,true);assert.equal(element('rules-panel').hidden,true);assert.equal(element('write-target').hidden,true);assert.equal(element('download-workbook').hidden,true);assert.equal(element('sheet-panel').hidden,true);assert.equal(element('sheet-select').disabled,true);assert.equal(element('project-select').disabled,true);assert.equal(element('management-view').hidden,false);
+  await element('project-remove').onclick();assert.equal(projects.length,0);assert.equal(vm.runInContext('project',context),undefined);assert.equal(element('source-panel').hidden,true);assert.equal(element('write-target').hidden,true);assert.equal(element('download-workbook').hidden,true);assert.equal(element('sheet-panel').hidden,true);assert.equal(element('sheet-select').disabled,true);assert.equal(element('project-select').disabled,true);assert.equal(element('management-view').hidden,false);
   await element('logout').onclick();
   assert.equal(requests.at(-1).path,'/api/logout');
   assert.equal(requests.at(-1).headers['X-Labwork-Token'],'test-token');assert.equal(redirect,'/login');

@@ -302,6 +302,10 @@ def main():
                 next_source = folder / 'D006-理化' / following[:4] / following.replace('-', '.') / ('D006-理化-' + following.replace('-', '') + '.xlsx')
                 next_source.parent.mkdir(parents=True, exist_ok=True)
                 next_source.write_bytes(b'existing-file-must-not-be-overwritten')
+                blocked_preview = server.ok('/api/month/preview', {'month': following})
+                assert not blocked_preview['can_create'] and blocked_preview['issues'] and blocked_preview['view']['rows']
+                assert blocked_preview['original_view']['rows']
+                assert server.api('/api/month', {'month': following, 'fingerprint': blocked_preview['fingerprint']})[0] == 409
                 assert server.api('/api/month', {'month': following})[0] == 409
                 assert next_source.read_bytes() == b'existing-file-must-not-be-overwritten'
                 assert not (home / 'months' / following).exists()
@@ -391,6 +395,44 @@ def main():
                 upload_only = server.ok('/api/workbook/UPLOAD_ONLY/remove', {})
                 assert (Path(upload_only['archive_path']) / 'UPLOAD_ONLY.xlsx').read_bytes() == original
                 assert not any(p['code'] == 'UPLOAD_ONLY' for p in server.ok('/api/catalog')['projects'])
+
+                # A flat workbook adopts a reviewed project/year/month tree, using its own old date.
+                flat_source = folder / '平铺' / 'K001-理化-202501.xlsx'
+                flat_source.parent.mkdir()
+                flat_source.write_bytes(original)
+                server.ok('/api/workbook/FLAT/source-import', {'path': str(flat_source), 'name': '../非法:项目名'})
+                unlinked_source = folder / '另一个平铺' / '其它-2025.01.xlsx'
+                unlinked_source.parent.mkdir()
+                unlinked_source.write_bytes(original)
+                server.ok('/api/workbook/FLAT_DOT/source-import', {'path': str(unlinked_source), 'name': '其它项目'})
+                after_january = cross_year[:4] + '-02'
+                snapshot = server.tree_snapshot(home)
+                flat_preview = server.ok('/api/month/preview', {'month': after_january, 'project': 'FLAT'})
+                target = flat_source.parent / 'K001-理化' / after_january[:4] / after_january.replace('-', '.') / ('K001-理化-' + after_january.replace('-', '') + '.xlsx')
+                target_dot = unlinked_source.parent / '其它项目' / after_january[:4] / after_january.replace('-', '.') / ('其它-' + after_january.replace('-', '.') + '.xlsx')
+                assert next(p['source_path'] for p in flat_preview['projects'] if p['code'] == 'FLAT') == str(target)
+                assert next(p['source_path'] for p in flat_preview['projects'] if p['code'] == 'FLAT_DOT') == str(target_dot)
+                assert flat_preview['can_create'] and flat_preview['view']['rows']
+                after_preview = server.tree_snapshot(home)
+                assert snapshot == after_preview, {name: (snapshot.get(name), after_preview.get(name)) for name in snapshot.keys() | after_preview.keys() if snapshot.get(name) != after_preview.get(name)}
+                assert not target.parent.exists() and flat_source.read_bytes() == original
+                target.parent.parent.parent.write_bytes(b'not-a-directory')
+                ancestor_blocked = server.ok('/api/month/preview', {'month': after_january, 'project': 'FLAT'})
+                assert not ancestor_blocked['can_create'] and ancestor_blocked['issues'] and ancestor_blocked['view']['rows']
+                target.parent.parent.parent.unlink()
+                target.parent.mkdir(parents=True)
+                target.write_bytes(b'never-overwrite')
+                blocked_flat = server.ok('/api/month/preview', {'month': after_january, 'project': 'FLAT'})
+                assert not blocked_flat['can_create'] and blocked_flat['issues'] and blocked_flat['view']['rows']
+                assert server.api('/api/month', {'month': after_january, 'fingerprint': blocked_flat['fingerprint']})[0] == 409
+                assert target.read_bytes() == b'never-overwrite' and flat_source.read_bytes() == original
+                target.unlink()
+                reviewed = server.ok('/api/month/preview', {'month': after_january, 'project': 'FLAT'})
+                server.ok('/api/month', {'month': after_january, 'fingerprint': reviewed['fingerprint']})
+                assert target.read_bytes() == (home / 'months' / after_january / 'workbooks/FLAT.xlsx').read_bytes()
+                assert target_dot.read_bytes() == (home / 'months' / after_january / 'workbooks/FLAT_DOT.xlsx').read_bytes()
+                assert flat_source.read_bytes() == unlinked_source.read_bytes() == original
+                server.verify_month(original, target.read_bytes(), server.ok('/api/catalog', month=cross_year)['monthly_rules']['FLAT'])
             except BaseException:
                 log.flush()
                 print((folder / 'server.log').read_text(encoding='utf-8', errors='replace'))
@@ -400,6 +442,8 @@ def main():
     assert fixture.read_bytes() == original
     report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'damaged_source_preview_and_format_rejected_without_write': True, 'grid10_damaged_preview_and_incomplete_write_rejected': True, 'valid_grid10_preview_remains_compatible': True, 'grid9_preview_cannot_replay_format_damage': True, 'grid9_incomplete_write_only_finalize_when_both_files_already_saved': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
     report.update({'version': latest['version'], 'executable_sha256': hashlib.sha256(server.startup.EXE.read_bytes()).hexdigest(), 'remove_project_archives_mirror_and_link_metadata': True, 'remove_project_preserves_original_history_and_backups': True, 'removed_preview_cannot_replay_after_reimport': True, 'remove_missing_original_allowed': True, 'remove_unlinked_upload_allowed': True, 'remove_failure_rolls_back_mirror_rules_and_sql': True, 'pending_write_blocks_removal': True, 'pending_write_blocks_template_preview_create_and_rules': True})
+    report.update({'flat_path_preview_and_safe_month_tree': True, 'flat_source_filename_uses_its_actual_old_date': True, 'illegal_project_label_does_not_escape_target_tree': True, 'blocked_destination_still_renders_preview': True, 'blocked_ancestor_file_still_renders_preview': True, 'automatic_rules_create_without_saved_confirmations': True})
+    report['limits'] = ['Preview snapshots include business files, rules, SQLite database and WAL; exclude the running lock and SQLite shared-memory reader marks.']
     (ROOT.parent / 'runtime/source-smoke-result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
 
