@@ -29,6 +29,16 @@ if (unsupported_formula.get('version')!=version or unsupported_formula.get('exec
     or unsupported_formula.get('unsupported_formula_sheets_preserved_by_default') is not True
     or unsupported_formula.get('explicit_input_clear_preserves_round_formula_and_fixed_parameter') is not True):
     raise RuntimeError('Unsupported formula template preservation regression did not pass for this executable')
+installer_settings=json.loads((repo/'runtime/installer-settings-regression.json').read_text(encoding='utf-8'))
+installer_firewall=json.loads((repo/'runtime/installer-firewall-regression.json').read_text(encoding='utf-8'))
+for report,helper,required in (
+    (installer_settings,'installer-settings.ps1',('inherited_password_exact','password_not_logged_or_in_arguments','different_data_requires_new_password','malformed_old_config_rejected','same_version_write_preserves_old_on_failure')),
+    (installer_firewall,'installer-firewall.ps1',('stable_port_rule','subnet_only','existing_rule_no_elevation','canceled_permission_not_success','removed_only_owned_rule','actual_parameter_set_validation')),
+):
+    if (report.get('ok') is not True or report.get('version')!=version or report.get('executable_sha256')!=exe_sha256
+        or report.get('helper_sha256')!=hashlib.sha256((root/'packaging'/helper).read_bytes()).hexdigest()
+        or not all(report.get(key) is True for key in required)):
+        raise RuntimeError(f'Installer helper regression did not pass for the release source: {helper}')
 auth=json.loads((repo/'runtime/auth-smoke-result.json').read_text(encoding='utf-8'))
 if not auth or not all(auth.values()):raise RuntimeError('Login persistence regression did not pass')
 formula=json.loads((repo/'runtime/formula-smoke-result.json').read_text(encoding='utf-8'))
@@ -73,7 +83,7 @@ if (native_excel.get('ok') is not True or native_excel.get('version')!=version
     or native_excel.get('fixed_column_widths_preserved') is not True
     or native_excel.get('frozen_panes_preserved') is not True):
     raise RuntimeError('Native Excel open and original layout regression did not pass for this executable')
-ui_directory=repo/'runtime/ui-qa/v0.0.4'
+ui_directory=repo/'runtime/ui-qa/v0.0.5'
 if any(path.suffix.lower() in ('.xlsx','.sqlite3') for path in ui_directory.rglob('*') if path.is_file()):raise RuntimeError('Browser evidence contains business files or a database')
 ui=json.loads((ui_directory/'result.json').read_text(encoding='utf-8'))
 if ui.get('ok') is not True or ui.get('version')!=version or ui.get('executable_sha256')!=exe_sha256 or ui.get('manual_source_write') is not True:raise RuntimeError('Browser regression did not pass for this executable')
@@ -94,7 +104,7 @@ for report in (checks,monthly,auth,formula,imports,lan,startup,format_checks,sou
 if subprocess.check_output(['git','status','--porcelain'],cwd=repo,text=True).strip():raise RuntimeError('Commit the reviewed release source before packaging')
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=repo,text=True).strip()
-if branch!='fix/v0.0.4-month-preview':raise RuntimeError('Package from the isolated v0.0.4 branch only')
+if branch!='fix/v0.0.5-install-settings-network':raise RuntimeError('Package from the isolated v0.0.5 branch only')
 release.mkdir(parents=True)
 portable=release/f'labwork-v{version}-Windows-x64.zip'
 with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
@@ -107,11 +117,11 @@ with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
 with zipfile.ZipFile(portable) as z:
     if any(n.endswith(('.xlsx','.sqlite3')) for n in z.namelist()):raise RuntimeError('Business data found in portable package')
 subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-v{version}-Source.zip'),commit],cwd=repo,check=True)
-for source in [root/'README.md',repo/'docs/版本更新-v0.0.4.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/unsupported-formula-preservation.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
+for source in [root/'README.md',repo/'docs/版本更新-v0.0.5.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/unsupported-formula-preservation.json',repo/'runtime/installer-settings-regression.json',repo/'runtime/installer-firewall-regression.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
     shutil.copyfile(source,release/source.name)
 shutil.copytree(ui_directory,release/'browser-qa')
 (release/'generic-workbook-regression.json').write_text(json.dumps(generic,indent=2),encoding='utf-8')
-manifest={'project':'labwork','release_name':f'labwork-v{version}','product_name':'labwork','binary_name':'labwork.exe','version':version,'git_commit':commit,'branch':branch,'executable_sha256':exe_sha256,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'unsupported_formula_preservation':unsupported_formula,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'native_excel_layout_regression':native_excel,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','native_excel_normal_open_checked':True,'native_excel_column_widths_and_frozen_panes_checked':True,'complete_office_formula_recalculation_checked':False}
+manifest={'project':'labwork','release_name':f'labwork-v{version}','product_name':'labwork','binary_name':'labwork.exe','version':version,'git_commit':commit,'branch':branch,'executable_sha256':exe_sha256,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'unsupported_formula_preservation':unsupported_formula,'installer_settings_regression':installer_settings,'installer_firewall_regression':installer_firewall,'installer_firewall_live_admin_checked':False,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'native_excel_layout_regression':native_excel,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','native_excel_normal_open_checked':True,'native_excel_column_widths_and_frozen_panes_checked':True,'complete_office_formula_recalculation_checked':False}
 (release/'发布信息.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
 (release/'SHA256SUMS.txt').write_text('\n'.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(release).as_posix()}' for p in sorted(release.rglob('*')) if p.is_file())+'\n',encoding='utf-8')
 print(json.dumps({'release':str(release),'exe_bytes':exe.stat().st_size,'zip_bytes':portable.stat().st_size},ensure_ascii=False))

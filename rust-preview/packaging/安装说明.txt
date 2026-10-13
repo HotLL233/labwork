@@ -1,13 +1,15 @@
-﻿labwork-v0.0.4
+﻿labwork-v0.0.5
 
 用途：在内网浏览器录入检测数据或手动结果，按原表公式计算并预览，
 确认后写入服务器本机关联的 XLSX。程序、月份数据和历史版本独立保存。
 安装包不含业务工作簿、账号或数据库。
-项目名为labwork，安装包名为labwork-v0.0.4.exe，程序名为labwork.exe。
+项目名为labwork，安装包名为labwork-v0.0.5.exe，程序名为labwork.exe。
 版本号只使用三段数字，不加alpha、grid等后缀。
 发布目录为releases\labwork-v版本号，历史已发布包保留原名便于回退。
 
-本版修正空白模板预览，默认自动识别录入区域，先预览再确认新建月份。
+本版修正升级口令保留和一次性内网端口配置。
+同数据目录升级口令留空沿用，填写新口令可更换；首次安装须设置内网口令。
+保留空白模板预览，默认自动识别录入区域，先预览再确认新建月份。
 保留损坏Excel拒写检查；发布前检查普通打开、列宽与冻结窗格。
 已受损文件需用写入前备份核对恢复，新版本不会自动重建过去丢失格式。
 原表备份在已配置数据目录的backups内，名为source-月份-项目-*.xlsx；
@@ -88,8 +90,11 @@
 新默认安装目录为%LOCALAPPDATA%\Programs\labwork。
 程序按versions\labwork-v版本号隔离，稳定产品升级沿用安装路径和数据设置。
 程序旁labwork.json保存port、data_dir、lan_ip、access_password。
-口令妥善保管，勿共享配置；重装需重新输入口令，其他选项沿用上次设置。
+同数据目录升级或重装，口令留空沿用已登记安装配置中的口令，填新口令更换。
+旧口令不在安装页显示；新安装、改用其他数据目录或旧配置无效时需设置内网口令。
+口令妥善保管，勿共享配置。
 静默安装支持/PORT、/DATADIR、/LANIP与/ACCESSPASSFILE读取UTF8口令文件；
+默认/FIREWALL=no，明确/FIREWALL=yes才配置内网规则。
 勿把口令放命令行，安装完成后删除临时口令文件。
 卸载保留data；升级保留旧版本程序，历史发布包保留供回退。
 升级前备份data和关联原表。
@@ -97,7 +102,11 @@
 同一数据目录不能同时运行多个版本，旧版不会自动读取或合并新月份记录。
 
 局域网防火墙：
-安装器不自动提权或修改防火墙。管理员按实际服务器地址和端口添加规则：
+安装页可选择配置内网端口规则，仅放行本机私网IPv4、TCP端口和LocalSubnet。
+首次创建或更改规则需Windows管理员授权；已有匹配规则时沿用，无需再授权。
+取消授权仍完成安装，内网访问须另行放行；卸载只清理当前产品自己的规则。
+安装时配置一次，正常启动不重复配置。跳过配置或使用便携包时，
+可由管理员按实际服务器地址和端口手动添加规则：
 New-NetFirewallRule -DisplayName 'labwork-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
 请替换示例IPv4及端口；只放行指定本机私网IP及同网段来源。
 
@@ -108,3 +117,5 @@ New-NetFirewallRule -DisplayName 'labwork-LAN' -Direction Inbound -Action Allow 
 当前公式仅支持四则运算、括号和单元格引用，复杂函数与宏不支持。
 缺少日期列的FPO/Sheet1、RD05/硼酯、RD05/三氟苯基溴化镁只读。
 320/390/768/1440浏览器视口测试不等于真实手机验收；Excel正常打开与布局检查见发布报告；完整重算与WPS原生打开未验收。
+
+安装端口规则的自动测试使用模拟数据及只读参数集检查；未实际改动生产防火墙或验收管理员弹窗。

@@ -1,4 +1,4 @@
-#define Version "0.0.4"
+#define Version "0.0.5"
 #ifndef AppIdValue
   #define AppIdValue "LabworkRustPlatform"
 #endif
@@ -40,6 +40,8 @@ Source: "..\target\release\labwork.exe"; DestDir: "{app}\versions\labwork-v{#Ver
 Source: "..\assets\labwork.ico"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
 Source: "安装说明.txt"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
+Source: "installer-settings.ps1"; Flags: dontcopy
+Source: "installer-firewall.ps1"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
 
 [InstallDelete]
 Type: files; Name: "{group}\工作簿副本目录.lnk"
@@ -62,8 +64,13 @@ Name: "{group}\卸载当前版本"; Filename: "{uninstallexe}"
 [Run]
 Filename: "{app}\versions\labwork-v{#Version}\labwork.exe"; Description: "启动 labwork（托盘）"; Flags: postinstall nowait skipifsilent unchecked
 
+[UninstallRun]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\versions\labwork-v{#Version}\installer-firewall.ps1"" -Mode Remove -AppId ""{#AppIdValue}"""; Flags: runhidden; RunOnceId: "labwork-network-rule"
+
 [Code]
 var SettingsPage: TInputQueryWizardPage;
+    FirewallPage: TInputOptionWizardPage;
+    OldConfig, RegisteredRoot: String;
 
 function HasStableRegistration: Boolean;
 begin
@@ -95,8 +102,23 @@ begin
 end;
 
 procedure InitializeWizard;
-var PasswordFile, LegacyPath, LegacyNotice, DefaultData, StablePath: String; PasswordBytes: AnsiString;
+var PasswordFile, PasswordText, LegacyPath, LegacyNotice, DefaultData, StablePath, IconPath, RootPrefix: String; PasswordBytes: AnsiString;
 begin
+  ExtractTemporaryFile('installer-settings.ps1');
+  OldConfig := ''; RegisteredRoot := '';
+  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdValue}_is1', 'Inno Setup: App Path', RegisteredRoot) then begin
+    OldConfig := GetPreviousData('ConfigPath', '');
+    if (OldConfig = '') and RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppIdValue}_is1', 'DisplayIcon', IconPath) then begin
+      if Copy(IconPath, Length(IconPath) - 1, 2) = ',0' then Delete(IconPath, Length(IconPath) - 1, 2);
+      OldConfig := ExtractFileDir(RemoveQuotes(IconPath)) + '\labwork.json';
+    end;
+    try
+      RootPrefix := AddBackslash(ExpandFileName(RegisteredRoot));
+      if CompareText(Copy(ExpandFileName(OldConfig), 1, Length(RootPrefix)), RootPrefix) <> 0 then OldConfig := '';
+    except
+      OldConfig := '';
+    end;
+  end;
   LegacyNotice := ''; DefaultData := '';
   if FindLegacy(LegacyPath) then begin
     LegacyNotice := ' 检测到旧版：' + LegacyPath + '。旧版会保留；已标记的旧 data 会预填。请先退出旧版；旧版自定义过数据目录的，请手选原目录。';
@@ -108,15 +130,29 @@ begin
   SettingsPage.Add('端口（1024–65535）：', False);
   SettingsPage.Add('数据目录（可选，填写本地绝对路径）：', False);
   SettingsPage.Add('服务器固定私网 IPv4（可选）：', False);
-  SettingsPage.Add('内网访问口令（至少12字符，重装需重新输入）：', True);
+  SettingsPage.Add('内网访问口令（首次至少12字符；升级留空沿用，填写可更换）：', True);
   SettingsPage.Values[0] := ExpandConstant('{param:PORT|' + GetPreviousData('Port', '18810') + '}');
   SettingsPage.Values[1] := ExpandConstant('{param:DATADIR|' + GetPreviousData('DataDirectory', DefaultData) + '}');
   SettingsPage.Values[2] := ExpandConstant('{param:LANIP|' + GetPreviousData('LanIP', '') + '}');
   PasswordFile := ExpandConstant('{param:ACCESSPASSFILE|}');
   if PasswordFile <> '' then begin
     if not LoadStringFromFile(PasswordFile, PasswordBytes) then RaiseException('无法读取访问口令文件。');
-    SettingsPage.Values[3] := Trim(UTF8Decode(PasswordBytes));
+    PasswordText := UTF8Decode(PasswordBytes);
+    if Copy(PasswordText, 1, 1) = #$FEFF then Delete(PasswordText, 1, 1);
+    SettingsPage.Values[3] := Trim(PasswordText);
   end;
+  FirewallPage := CreateInputOptionPage(SettingsPage.ID, '内网访问设置',
+    '允许同网段访问平台', '仅放行上一步所填的服务器 IP 和 TCP 端口，允许同网段访问。已有匹配规则会直接沿用；首次配置或修改需要 Windows 管理员授权。取消授权不会中止安装，可稍后手动放行。', False, False);
+  FirewallPage.Add('配置内网端口放行（首次需要 Windows 管理员授权）');
+  if WizardSilent then
+    FirewallPage.Values[0] := CompareText(ExpandConstant('{param:FIREWALL|no}'), 'yes') = 0
+  else
+    FirewallPage.Values[0] := CompareText(ExpandConstant('{param:FIREWALL|yes}'), 'yes') = 0;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = FirewallPage.ID) and (Trim(SettingsPage.Values[2]) = '');
 end;
 
 procedure RegisterPreviousData(PreviousDataKey: Integer);
@@ -124,6 +160,36 @@ begin
   SetPreviousData(PreviousDataKey, 'Port', Trim(SettingsPage.Values[0]));
   SetPreviousData(PreviousDataKey, 'DataDirectory', DataDirectory(''));
   SetPreviousData(PreviousDataKey, 'LanIP', Trim(SettingsPage.Values[2]));
+  SetPreviousData(PreviousDataKey, 'ConfigPath', ExpandConstant('{app}\versions\labwork-v{#Version}\labwork.json'));
+end;
+
+function JsonString(Value: String): String;
+begin
+  StringChangeEx(Value, '\', '\\', True);
+  StringChangeEx(Value, '"', '\"', True);
+  StringChangeEx(Value, #13, '\r', True);
+  StringChangeEx(Value, #10, '\n', True);
+  StringChangeEx(Value, #9, '\t', True);
+  Result := '"' + Value + '"';
+end;
+
+function RunSettingsHelper(Mode, TargetFile: String): Integer;
+var RequestFile, Config, Params: String; Status: Integer;
+begin
+  Result := 20;
+  RequestFile := ExpandConstant('{tmp}\settings-request.json');
+  Config := '{"port":' + IntToStr(StrToInt(Trim(SettingsPage.Values[0]))) + ',"data_dir":' + JsonString(DataDirectory('')) + ',"lan_ip":' + JsonString(Trim(SettingsPage.Values[2])) + ',"access_password":' + JsonString(SettingsPage.Values[3]) + '}';
+  try
+    if not SaveStringToFile(RequestFile, UTF8Encode(Config), False) then Exit;
+    Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + AddQuotes(ExpandConstant('{tmp}\installer-settings.ps1')) +
+      ' -Mode ' + Mode + ' -RequestFile ' + AddQuotes(RequestFile);
+    if OldConfig <> '' then Params := Params + ' -OldConfig ' + AddQuotes(OldConfig);
+    if RegisteredRoot <> '' then Params := Params + ' -RegisteredRoot ' + AddQuotes(RegisteredRoot);
+    if TargetFile <> '' then Params := Params + ' -TargetFile ' + AddQuotes(TargetFile);
+    if Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, Status) then Result := Status;
+  finally
+    DeleteFile(RequestFile);
+  end;
 end;
 
 function IsPrivateIPv4(Value: String): Boolean;
@@ -179,12 +245,6 @@ begin
     if not IsPrivateIPv4(Trim(SettingsPage.Values[2])) then begin
       Result := '内网地址须为 10.x、172.16–31.x 或 192.168.x 私网 IPv4，不能填写 0.0.0.0 或 127.0.0.1。'; Exit;
     end;
-    if Length(SettingsPage.Values[3]) < 12 then begin
-      Result := '内网访问口令至少需要12个字符。'; Exit;
-    end;
-  end;
-  if Length(SettingsPage.Values[3]) > 256 then begin
-    Result := '访问口令不能超过256个字符。'; Exit;
   end;
   DataPath := DataDirectory('');
   if LegacyRunning('0.0.2-alpha.1-grid.4', DataPath) or LegacyRunning('0.0.2-alpha.1-grid.3', DataPath) then begin
@@ -200,8 +260,15 @@ begin
   if FileExists(DataPath) then begin
     Result := '数据目录不能是已有文件。'; Exit;
   end;
-  if DirExists(DataPath) and not FileExists(DataPath + '\.labwork-rust-preview') then
-    Result := '数据目录已存在但没有平台标记，请选择新的独立目录，避免覆盖未知数据。';
+  if DirExists(DataPath) and not FileExists(DataPath + '\.labwork-rust-preview') then begin
+    Result := '数据目录已存在但没有平台标记，请选择新的独立目录，避免覆盖未知数据。'; Exit;
+  end;
+  case RunSettingsHelper('Check', '') of
+    0: ;
+    10: Result := '内网访问口令须为12至256个字符。留空仅能沿用同一数据目录的有效旧口令；首次安装、切换数据目录或旧配置缺失时请设置新口令。';
+  else
+    Result := '无法检查平台配置。请确认 Windows PowerShell 可运行后重试。';
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -220,18 +287,8 @@ begin
   Result := SettingsError;
 end;
 
-function JsonString(Value: String): String;
-begin
-  StringChangeEx(Value, '\', '\\', True);
-  StringChangeEx(Value, '"', '\"', True);
-  StringChangeEx(Value, #13, '\r', True);
-  StringChangeEx(Value, #10, '\n', True);
-  StringChangeEx(Value, #9, '\t', True);
-  Result := '"' + Value + '"';
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
-var DataPath, Config: String;
+var DataPath, FirewallParams: String; FirewallStatus: Integer;
 begin
   if CurStep = ssPostInstall then begin
     DataPath := DataDirectory('');
@@ -240,8 +297,17 @@ begin
     if not FileExists(DataPath + '\.labwork-rust-preview') then
       if not SaveStringToFile(DataPath + '\.labwork-rust-preview', 'isolated Rust preview {#Version}', False) then
         RaiseException('无法初始化独立数据目录。');
-    Config := '{"port":' + IntToStr(StrToInt(Trim(SettingsPage.Values[0]))) + ',"data_dir":' + JsonString(DataPath) + ',"lan_ip":' + JsonString(Trim(SettingsPage.Values[2])) + ',"access_password":' + JsonString(SettingsPage.Values[3]) + '}';
-    if not SaveStringToFile(ExpandConstant('{app}\versions\labwork-v{#Version}\labwork.json'), UTF8Encode(Config), False) then
-      RaiseException('无法保存平台配置。');
+    if RunSettingsHelper('Write', ExpandConstant('{app}\versions\labwork-v{#Version}\labwork.json')) <> 0 then
+      RaiseException('无法保存平台配置，原配置已保留。请检查权限或重新设置访问口令后重试。');
+    if (Trim(SettingsPage.Values[2]) <> '') and FirewallPage.Values[0] then begin
+      FirewallParams := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
+        AddQuotes(ExpandConstant('{app}\versions\labwork-v{#Version}\installer-firewall.ps1')) +
+        ' -Mode Configure -AppId "{#AppIdValue}" -Port ' + Trim(SettingsPage.Values[0]) +
+        ' -LocalAddress ' + AddQuotes(Trim(SettingsPage.Values[2]));
+      if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), FirewallParams, '', SW_HIDE, ewWaitUntilTerminated, FirewallStatus) then
+        FirewallStatus := 21;
+      if FirewallStatus <> 0 then
+        SuppressibleMsgBox('labwork 已安装，内网放行未完成（状态 ' + IntToStr(FirewallStatus) + '）。本机仍可访问；请稍后配置防火墙。若启动时出现 Windows 网络提示，按实际使用的网络选择允许。', mbInformation, MB_OK, IDOK);
+    end;
   end;
 end;

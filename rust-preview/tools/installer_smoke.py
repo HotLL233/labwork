@@ -1,5 +1,5 @@
 """Exercise the real Chinese installer with isolated settings and retained data."""
-import argparse,hashlib,json,os,socket,subprocess,time,tomllib,urllib.request,uuid,winreg
+import argparse,hashlib,json,os,re,socket,subprocess,time,tomllib,urllib.request,uuid,winreg
 from pathlib import Path
 import startup_smoke as startup
 
@@ -50,6 +50,8 @@ install_root=test/'installed';app=install_root/'versions'/f'labwork-v{version}';
 with socket.socket() as probe:
     probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
 def run(exe,*args):
+    if Path(exe)==installer and not any(arg.upper().startswith('/FIREWALL=') for arg in args):
+        args=(*args,'/FIREWALL=no')
     if Path(exe)==installer and not any(arg.upper().startswith('/GROUP=') for arg in args):
         args=(*args,f'/GROUP=Labwork installer test {test.name}')
     return subprocess.run([str(exe),'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',*args],timeout=90).returncode
@@ -64,6 +66,7 @@ assert config=={'port':port,'data_dir':str(data),'lan_ip':'','access_password':'
 assert (data/'.labwork-rust-preview').is_file() and (data/'workbooks').is_dir()
 assert not list(app.glob('*.cmd'))
 assert (app/'labwork.ico').is_file()
+assert (app/'installer-firewall.ps1').read_bytes()==(root/'packaging/installer-firewall.ps1').read_bytes()
 check_shortcut(app)
 older=install_root/'versions'/'0.0.2-alpha.1-grid.7';older.mkdir()
 (older/'labwork-preview.exe').write_bytes(b'previous version sentinel')
@@ -129,11 +132,63 @@ assert run(installer,f'/DIR={lan_root}',f'/PORT={port}',f'/DATADIR={lan_data}','
 lan_config=json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))
 assert lan_config=={'port':port,'data_dir':str(lan_data),'lan_ip':'192.168.1.50','access_password':secret}
 assert secret not in (test/'lan-install.log').read_text(encoding='utf-8-sig')
+assert run(installer,f'/DIR={lan_root}',f'/LOG={test / "lan-reinstall.log"}')==0
+assert json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))==lan_config,'LAN reinstall did not preserve the password'
+before=(lan_app/'labwork.json').read_bytes()
+assert run(installer,f'/DIR={lan_root}',f'/DATADIR={test / "new-lan-data"}',f'/LOG={test / "different-data-password-required.log"}')!=0
+assert (lan_app/'labwork.json').read_bytes()==before
+assert not (test/'new-lan-data').exists()
+for index,damaged in enumerate(('broken JSON',json.dumps({**lan_config,'access_password':'short'}))):
+    (lan_app/'labwork.json').write_text(damaged,encoding='utf-8')
+    assert run(installer,f'/DIR={lan_root}',f'/LOG={test / ("old-config-rejected-"+str(index)+".log")}')!=0
+    assert (lan_app/'labwork.json').read_text(encoding='utf-8')==damaged
+(lan_app/'labwork.json').write_bytes(before)
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER,key,0,winreg.KEY_READ|winreg.KEY_SET_VALUE) as registration:
+    config_value=[winreg.EnumValue(registration,index)[0] for index in range(winreg.QueryInfoKey(registration)[1])
+                  if winreg.EnumValue(registration,index)[0].endswith('ConfigPath')]
+    assert len(config_value)==1,'Active config path was not registered'
+    config_value=config_value[0]
+    assert Path(winreg.QueryValueEx(registration,config_value)[0])==lan_app/'labwork.json'
+active=lan_root/'versions'/'labwork-v0.0.1';active.mkdir()
+decoy=lan_root/'versions'/'labwork-v99.0.0';decoy.mkdir()
+active_secret='active-only-'+uuid.uuid4().hex
+active_config={**lan_config,'access_password':active_secret}
+(active/'labwork.json').write_text(json.dumps(active_config),encoding='utf-8')
+(decoy/'labwork.json').write_text(json.dumps({**lan_config,'access_password':'decoy-only-'+uuid.uuid4().hex}),encoding='utf-8')
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER,key,0,winreg.KEY_SET_VALUE) as registration:
+    winreg.SetValueEx(registration,config_value,0,winreg.REG_SZ,str(active/'labwork.json'))
+    winreg.SetValueEx(registration,'DisplayIcon',0,winreg.REG_SZ,str(decoy/'labwork.ico'))
+assert run(installer,f'/DIR={lan_root}',f'/LOG={test / "active-config-path.log"}')==0
+assert json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))==active_config,'Installer selected an inactive version config'
+assert json.loads((active/'labwork.json').read_text(encoding='utf-8'))==active_config
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER,key,0,winreg.KEY_SET_VALUE) as registration:
+    winreg.DeleteValue(registration,config_value)
+    winreg.SetValueEx(registration,'DisplayIcon',0,winreg.REG_SZ,'"'+str(active/'labwork.ico')+'",0')
+assert run(installer,f'/DIR={lan_root}',f'/LOG={test / "legacy-display-icon.log"}')==0
+assert json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))==active_config,'Prior installers without ConfigPath did not inherit their registered active config'
+special_secret='替换口令-test-"\\-tab\t-newline\n-end'
+secret_file.write_text(special_secret,encoding='utf-8-sig',newline='')
+assert run(installer,f'/DIR={lan_root}',f'/ACCESSPASSFILE={secret_file}',f'/LOG={test / "new-password.log"}')==0
+expected_config={**lan_config,'access_password':special_secret}
+assert json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))==expected_config,'Explicit replacement password was not saved exactly'
+assert run(installer,f'/DIR={lan_root}',f'/LOG={test / "special-password-reinstall.log"}')==0
+assert json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))==expected_config
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER,key) as registration:
+    for index in range(winreg.QueryInfoKey(registration)[1]):
+        _,value,_=winreg.EnumValue(registration,index)
+        assert all(password not in str(value) for password in (secret,active_secret,special_secret)),'Password stored in uninstall registration'
+for log in test.glob('*.log'):
+    contents=log.read_text(encoding='utf-8-sig',errors='replace')
+    assert all(password not in contents for password in (secret,active_secret,special_secret)),'Password leaked into installer log'
+    for request_path in re.findall(r'-RequestFile "([^"]+settings-request\.json)"',contents):
+        assert not Path(request_path).exists(),'Temporary settings request retained after installer exit'
 assert run(lan_root/'unins000.exe',f'/LOG={test / "lan-uninstall.log"}')==0
 assert (lan_data/'.labwork-rust-preview').exists()
 assert not shortcut.exists(),'LAN test uninstall left desktop shortcut'
 secret_file.unlink()
 result={'project_version_directory_exe_and_display_name':True,'desktop_shortcut_actual_launch_http_and_graceful_stop':True,'desktop_shortcut_target_workdir_icon':True,'desktop_shortcut_updated_on_reinstall':True,'desktop_shortcut_removed_on_uninstall':True,'install':True,'installed_binary_hash':True,'custom_port':True,'external_data_config':True,'reinstall_preserves_settings':True,'older_version_files_preserved':True,'installed_server_http':True,'no_cmd_entry':True,'uninstall':True,'external_data_preserved':True,'running_data_rejected':True,'unmarked_data_rejected':True,'invalid_ports_rejected':True,'invalid_lan_addresses_rejected':True,'lan_password_required':True,'long_password_rejected':True,'lan_config_saved':True,'password_not_in_install_log':True,'logs':str(test),'installer_bytes':installer.stat().st_size}
+result.update({'lan_reinstall_inherits_password_without_entry':True,'different_data_requires_new_password':True,'invalid_old_config_not_overwritten':True,'registered_active_config_selected_over_other_versions':True,'previous_display_icon_config_inherited':True,'explicit_new_password_and_special_characters_exact':True,'password_not_stored_in_registry':True,'temporary_settings_requests_removed':True})
+result.update({'firewall_helper_installed_exactly':True,'firewall_configuration_disabled_during_isolated_qa':True,'live_firewall_administrator_changes_checked':False})
 if args.app_id!='LabworkRustPlatform':
     assert product_registration()==original_registration,'Real product registration changed during isolated QA'
     assert (real_shortcut.read_bytes() if real_shortcut.exists() else None)==original_shortcut,'Real desktop shortcut changed during QA'
