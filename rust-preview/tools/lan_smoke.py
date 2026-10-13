@@ -60,7 +60,7 @@ def run():
 
         log_path = folder / "server.log"
         with log_path.open("wb") as log:
-            command = [str(ROOT / "target/release/labwork-preview.exe"), "--headless", "--config", str(config)]
+            command = [str(ROOT / "target/release/labwork.exe"), "--headless", "--config", str(config)]
             process = subprocess.Popen(command, stdout=log, stderr=log)
             try:
                 for attempt in range(100):

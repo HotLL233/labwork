@@ -8,11 +8,13 @@ import zipfile
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
-version=tomllib.loads((root/'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
+project=tomllib.loads((root/'Cargo.toml').read_text(encoding='utf-8'))['package']
+if project['name']!='labwork':raise RuntimeError('Package project name must be labwork')
+version=project['version']
 repo=root.parent
-release=Path('C:/labwork/releases')/f'v{version}'
+release=Path('C:/labwork/releases')/f'labwork-v{version}'
 if release.exists():raise RuntimeError('Release already exists; do not overwrite published files')
-exe=root/'target/release/labwork-preview.exe'
+exe=root/'target/release/labwork.exe'
 checks=json.loads((repo/'runtime/rust-smoke-result.json').read_text(encoding='utf-8'))
 if checks.get('methods')!=14 or not all(checks.values()):raise RuntimeError('File regression did not pass')
 monthly=json.loads((repo/'runtime/month-smoke-result.json').read_text(encoding='utf-8'))
@@ -67,9 +69,9 @@ commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).st
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=repo,text=True).strip()
 if branch!='fix/grid10-preserve-workbook-format':raise RuntimeError('Package from the isolated grid10 branch only')
 release.mkdir(parents=True)
-portable=release/f'labwork-{version}-Rust-Windows-x64.zip'
+portable=release/f'labwork-v{version}-Windows-x64.zip'
 with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
-    z.write(exe,'labwork-preview.exe')
+    z.write(exe,'labwork.exe')
     z.write(root/'README.md','README.md')
     z.write(root/'packaging/安装说明.txt','安装说明.txt')
     z.writestr('labwork.json',json.dumps({'port':18810,'data_dir':'data','lan_ip':'','access_password':''},ensure_ascii=False))
@@ -77,12 +79,12 @@ with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     z.writestr('data/workbooks/','')
 with zipfile.ZipFile(portable) as z:
     if any(n.endswith(('.xlsx','.sqlite3')) for n in z.namelist()):raise RuntimeError('Business data found in portable package')
-subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-{version}-Source.zip'),commit],cwd=repo,check=True)
-for source in [root/'README.md',repo/'docs/表格修订版-grid.10.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
+subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-v{version}-Source.zip'),commit],cwd=repo,check=True)
+for source in [root/'README.md',repo/'docs/表格修订版-grid.10.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
     shutil.copyfile(source,release/source.name)
 shutil.copytree(ui_directory,release/'browser-qa')
 (release/'generic-workbook-regression.json').write_text(json.dumps(generic,indent=2),encoding='utf-8')
-manifest={'version':version,'git_commit':commit,'branch':branch,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','office_recalculation_checked':False}
+manifest={'project':'labwork','release_name':f'labwork-v{version}','product_name':f'labwork-v{version}','binary_name':'labwork.exe','version':version,'git_commit':commit,'branch':branch,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','office_recalculation_checked':False}
 (release/'发布信息.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
 (release/'SHA256SUMS.txt').write_text('\n'.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(release).as_posix()}' for p in sorted(release.rglob('*')) if p.is_file())+'\n',encoding='utf-8')
 print(json.dumps({'release':str(release),'exe_bytes':exe.stat().st_size,'zip_bytes':portable.stat().st_size},ensure_ascii=False))

@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
     home.mkdir();(home/'.labwork-rust-preview').write_text('test')
     shutil.copytree(source,home/'workbooks')
     log=open(Path(folder)/'server.log','w')
-    exe=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'target/release/labwork-preview.exe'
+    exe=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'target/release/labwork.exe'
     process=subprocess.Popen([str(exe),'--headless','--port','19846','--home',str(home)],stdout=log,stderr=log)
     try:
         for attempt in range(60):

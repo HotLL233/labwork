@@ -10,7 +10,7 @@ parser.add_argument('--installer',type=Path)
 parser.add_argument('--app-id',default='LabworkRustPlatform')
 parser.add_argument('--report-dir',type=Path)
 args=parser.parse_args()
-installer=args.installer or Path('C:/labwork/releases')/f'v{version}/installer'/f'labwork-{version}-Windows-x64-Setup.exe'
+installer=args.installer or Path('C:/labwork/releases')/f'labwork-v{version}/installer'/f'labwork-v{version}.exe'
 if args.app_id!='LabworkRustPlatform':
     assert args.app_id.startswith('LabworkRustPlatform-QA-') and args.app_id in installer.stem,'QA installer filename must identify its isolated AppId'
 key=fr'Software\Microsoft\Windows\CurrentVersion\Uninstall\{args.app_id}_is1'
@@ -36,7 +36,7 @@ def shortcut_properties():
     return json.loads(powershell("$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:LABWORK_QA_LINK);@{target=$link.TargetPath;working=$link.WorkingDirectory;icon=$link.IconLocation;arguments=$link.Arguments}|ConvertTo-Json -Compress",{'LABWORK_QA_LINK':str(shortcut)}))
 def check_shortcut(directory):
     link=shortcut_properties()
-    assert Path(link['target'])==directory/'labwork-preview.exe',link
+    assert Path(link['target'])==directory/'labwork.exe',link
     assert Path(link['working'])==directory,link
     assert Path(link['icon'].rsplit(',',1)[0])==directory/'labwork.ico',link
     assert not link['arguments'],link
@@ -46,7 +46,7 @@ try:
 except FileNotFoundError:pass
 else:raise RuntimeError('This version is already installed; refuse to replace its registration during test')
 test=Path('C:/labwork/tmp')/('rust-installer-'+uuid.uuid4().hex[:8]);test.mkdir(parents=True)
-install_root=test/'installed';app=install_root/'versions'/version;data=test/'外部数据'
+install_root=test/'installed';app=install_root/'versions'/f'labwork-v{version}';data=test/'外部数据'
 with socket.socket() as probe:
     probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
 def run(exe,*args):
@@ -55,7 +55,10 @@ def run(exe,*args):
     return subprocess.run([str(exe),'/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',*args],timeout=90).returncode
 code=run(installer,f'/DIR={install_root}',f'/PORT={port}',f'/DATADIR={data}',f'/GROUP=Labwork installer test {test.name}',f'/LOG={test / "install.log"}')
 assert code==0,code
-assert hashlib.sha256((app/'labwork-preview.exe').read_bytes()).digest()==hashlib.sha256((root/'target/release/labwork-preview.exe').read_bytes()).digest()
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER,key) as registration:
+    assert winreg.QueryValueEx(registration,'DisplayName')[0]==f'labwork-v{version}'
+assert app.name==f'labwork-v{version}' and not (app/'labwork-preview.exe').exists()
+assert hashlib.sha256((app/'labwork.exe').read_bytes()).digest()==hashlib.sha256((root/'target/release/labwork.exe').read_bytes()).digest()
 config=json.loads((app/'labwork.json').read_text(encoding='utf-8-sig'))
 assert config=={'port':port,'data_dir':str(data),'lan_ip':'','access_password':''},config
 assert (data/'.labwork-rust-preview').is_file() and (data/'workbooks').is_dir()
@@ -63,13 +66,13 @@ assert not list(app.glob('*.cmd'))
 assert (app/'labwork.ico').is_file()
 check_shortcut(app)
 older=install_root/'versions'/'0.0.2-alpha.1-grid.7';older.mkdir()
-(older/'retain.exe').write_bytes(b'previous version sentinel')
-powershell("$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:LABWORK_QA_LINK);$link.TargetPath=$env:LABWORK_QA_OLD;$link.WorkingDirectory=$env:LABWORK_QA_OLD_DIR;$link.Save()",{'LABWORK_QA_LINK':str(shortcut),'LABWORK_QA_OLD':str(older/'retain.exe'),'LABWORK_QA_OLD_DIR':str(older)})
+(older/'labwork-preview.exe').write_bytes(b'previous version sentinel')
+powershell("$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:LABWORK_QA_LINK);$link.TargetPath=$env:LABWORK_QA_OLD;$link.WorkingDirectory=$env:LABWORK_QA_OLD_DIR;$link.Save()",{'LABWORK_QA_LINK':str(shortcut),'LABWORK_QA_OLD':str(older/'labwork-preview.exe'),'LABWORK_QA_OLD_DIR':str(older)})
 assert run(installer,f'/DIR={install_root}',f'/LOG={test / "reinstall.log"}')==0
-assert (older/'retain.exe').read_bytes()==b'previous version sentinel'
+assert (older/'labwork-preview.exe').read_bytes()==b'previous version sentinel'
 check_shortcut(app)
 assert json.loads((app/'labwork.json').read_text(encoding='utf-8-sig'))==config
-process=subprocess.Popen([str(app/'labwork-preview.exe'),'--headless'],cwd=test,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+process=subprocess.Popen([str(app/'labwork.exe'),'--headless'],cwd=test,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 try:
     for attempt in range(80):
         try:
@@ -105,15 +108,15 @@ sentinel=data/'retain-test.txt';sentinel.write_text('preserve data',encoding='ut
 assert run(install_root/'unins000.exe',f'/LOG={test / "uninstall.log"}')==0
 assert sentinel.read_text(encoding='utf-8')=='preserve data'
 assert (data/'.labwork-rust-preview').exists() and (data/'preview.sqlite3').exists()
-assert not (app/'labwork-preview.exe').exists()
+assert not (app/'labwork.exe').exists()
 assert not shortcut.exists(),'Uninstall left desktop shortcut'
 bad=test/'unmarked';bad.mkdir();(bad/'sentinel.txt').write_text('unchanged')
 rejected=run(installer,f'/DIR={test / "bad-app"}',f'/DATADIR={bad}',f'/LOG={test / "rejected.log"}')
 assert rejected!=0 and (bad/'sentinel.txt').read_text()=='unchanged'
-assert not (test/'bad-app/labwork-preview.exe').exists()
+assert not (test/'bad-app/versions'/f'labwork-v{version}'/'labwork.exe').exists()
 for invalid in ('1023','65536','abc'):
     assert run(installer,f'/DIR={test / "bad-port"}',f'/PORT={invalid}',f'/LOG={test / ("port-"+invalid+".log")}')!=0
-assert not (test/'bad-port/labwork-preview.exe').exists()
+assert not (test/'bad-port/versions'/f'labwork-v{version}'/'labwork.exe').exists()
 for index,invalid in enumerate(('0.0.0.0','127.0.0.1','8.8.8.8','172.32.0.1','192.168.1.999','10.01.2.3')):
     assert run(installer,f'/DIR={test / "bad-lan"}',f'/LANIP={invalid}',f'/LOG={test / ("lan-"+str(index)+".log")}')!=0
 secret_file=test/'access-password.txt';secret=uuid.uuid4().hex
@@ -121,7 +124,7 @@ secret_file.write_text('x'*257,encoding='utf-8')
 assert run(installer,f'/DIR={test / "long-password"}','/LANIP=192.168.1.50',f'/ACCESSPASSFILE={secret_file}',f'/LOG={test / "long-password.log"}')!=0
 secret_file.write_text(secret,encoding='utf-8')
 assert run(installer,f'/DIR={test / "short-password"}','/LANIP=192.168.1.50',f'/LOG={test / "short-password.log"}')!=0
-lan_root=test/'lan-installed';lan_app=lan_root/'versions'/version;lan_data=test/'内网数据'
+lan_root=test/'lan-installed';lan_app=lan_root/'versions'/f'labwork-v{version}';lan_data=test/'内网数据'
 assert run(installer,f'/DIR={lan_root}',f'/PORT={port}',f'/DATADIR={lan_data}','/LANIP=192.168.1.50',f'/ACCESSPASSFILE={secret_file}',f'/LOG={test / "lan-install.log"}')==0
 lan_config=json.loads((lan_app/'labwork.json').read_text(encoding='utf-8-sig'))
 assert lan_config=={'port':port,'data_dir':str(lan_data),'lan_ip':'192.168.1.50','access_password':secret}
@@ -130,7 +133,7 @@ assert run(lan_root/'unins000.exe',f'/LOG={test / "lan-uninstall.log"}')==0
 assert (lan_data/'.labwork-rust-preview').exists()
 assert not shortcut.exists(),'LAN test uninstall left desktop shortcut'
 secret_file.unlink()
-result={'desktop_shortcut_actual_launch_http_and_graceful_stop':True,'desktop_shortcut_target_workdir_icon':True,'desktop_shortcut_updated_on_reinstall':True,'desktop_shortcut_removed_on_uninstall':True,'install':True,'installed_binary_hash':True,'custom_port':True,'external_data_config':True,'reinstall_preserves_settings':True,'older_version_files_preserved':True,'installed_server_http':True,'no_cmd_entry':True,'uninstall':True,'external_data_preserved':True,'running_data_rejected':True,'unmarked_data_rejected':True,'invalid_ports_rejected':True,'invalid_lan_addresses_rejected':True,'lan_password_required':True,'long_password_rejected':True,'lan_config_saved':True,'password_not_in_install_log':True,'logs':str(test),'installer_bytes':installer.stat().st_size}
+result={'project_version_directory_exe_and_display_name':True,'desktop_shortcut_actual_launch_http_and_graceful_stop':True,'desktop_shortcut_target_workdir_icon':True,'desktop_shortcut_updated_on_reinstall':True,'desktop_shortcut_removed_on_uninstall':True,'install':True,'installed_binary_hash':True,'custom_port':True,'external_data_config':True,'reinstall_preserves_settings':True,'older_version_files_preserved':True,'installed_server_http':True,'no_cmd_entry':True,'uninstall':True,'external_data_preserved':True,'running_data_rejected':True,'unmarked_data_rejected':True,'invalid_ports_rejected':True,'invalid_lan_addresses_rejected':True,'lan_password_required':True,'long_password_rejected':True,'lan_config_saved':True,'password_not_in_install_log':True,'logs':str(test),'installer_bytes':installer.stat().st_size}
 if args.app_id!='LabworkRustPlatform':
     assert product_registration()==original_registration,'Real product registration changed during isolated QA'
     assert (real_shortcut.read_bytes() if real_shortcut.exists() else None)==original_shortcut,'Real desktop shortcut changed during QA'

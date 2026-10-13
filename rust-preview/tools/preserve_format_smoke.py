@@ -133,5 +133,5 @@ def run(exe):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--exe', type=Path, default=ROOT / 'target/release/labwork-preview.exe')
+    parser.add_argument('--exe', type=Path, default=ROOT / 'target/release/labwork.exe')
     run(parser.parse_args().exe.resolve())

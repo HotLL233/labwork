@@ -276,7 +276,7 @@ async fn download(State(state):State<Shared>,Path(id):Path<String>) -> Result<Re
     let app=state.lock().unwrap();
     if id.len()!=32 || !id.bytes().all(|c|c.is_ascii_hexdigit()) {return Err(error("预览编号无效"));}
     let bytes=fs::read(app.home.join("previews").join(format!("{id}.xlsx"))).map_err(error)?;
-    Ok(([(header::CONTENT_TYPE,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),(header::CONTENT_DISPOSITION,"attachment; filename=Labwork-preview.xlsx")],bytes).into_response())
+    Ok(([(header::CONTENT_TYPE,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),(header::CONTENT_DISPOSITION,"attachment; filename=labwork-preview.xlsx")],bytes).into_response())
 }
 async fn history(State(state):State<Shared>,headers:HeaderMap) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap();
@@ -338,7 +338,7 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
         .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))
         .layer(DefaultBodyLimit::max(1024*1024)).layer(middleware::from_fn_with_state(state.clone(),auth::guard)).layer(middleware::from_fn_with_state(state.clone(),local_host)).with_state(state);
-    println!("Rust + SQLite validation: http://127.0.0.1:{port} ; Ctrl+C to stop");
+    println!("labwork-v{}: http://127.0.0.1:{port} ; Ctrl+C to stop",env!("CARGO_PKG_VERSION"));
     axum::serve(listener,router).with_graceful_shutdown(async move {
         if tray_mode {let _=shutdown_rx.await;}
         else {let _=tokio::signal::ctrl_c().await;}

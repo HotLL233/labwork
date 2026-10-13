@@ -1,8 +1,10 @@
-﻿labwork Rust 验证版 0.0.2-alpha.1-grid.10
+﻿labwork-v0.0.2-alpha.1-grid.10
 
 用途：在内网浏览器录入检测数据或手动结果，按原表公式计算并预览，
 确认后写入服务器本机关联的 XLSX。程序、月份数据和历史版本独立保存。
 安装包不含业务工作簿、账号或数据库。
+项目名为labwork，安装包名为labwork-v版本号.exe，程序名为labwork.exe。
+发布目录为releases\labwork-v版本号，历史已发布包保留原名便于回退。
 
 本版修复写入后格式受损：保留 XML 限定属性、冻结窗格、固定列宽、
 合并、打印设置及链接；原有空单元格保留属性，新增行沿用样式和行高。
@@ -66,7 +68,7 @@ month-rules-v2.json旧规则保留供回退；首次新建月份前重新确认�
 
 配置、升级和回退：
 新默认安装目录为%LOCALAPPDATA%\Programs\labwork。
-程序按versions\版本号隔离，稳定产品升级沿用安装路径和数据设置。
+程序按versions\labwork-v版本号隔离，稳定产品升级沿用安装路径和数据设置。
 程序旁labwork.json保存port、data_dir、lan_ip、access_password。
 口令妥善保管，勿共享配置；重装需重新输入口令，其他选项沿用上次设置。
 静默安装支持/PORT、/DATADIR、/LANIP与/ACCESSPASSFILE读取UTF8口令文件；

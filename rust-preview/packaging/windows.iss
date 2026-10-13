@@ -11,7 +11,7 @@
 AppId={#AppIdValue}
 AppName=labwork
 AppVersion={#Version}
-AppVerName=labwork {#Version}
+AppVerName=labwork-v{#Version}
 DefaultDirName={code:DefaultInstallDirectory}
 DefaultGroupName=labwork
 UsePreviousGroup=no
@@ -19,14 +19,14 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-OutputDir=..\..\..\..\releases\v{#Version}\installer
-OutputBaseFilename=labwork-{#Version}-Windows-x64-Setup
+OutputDir=..\..\..\..\releases\labwork-v{#Version}\installer
+OutputBaseFilename=labwork-v{#Version}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 DisableProgramGroupPage=yes
 SetupIconFile=..\assets\labwork.ico
-UninstallDisplayIcon={app}\versions\{#Version}\labwork.ico
+UninstallDisplayIcon={app}\versions\labwork-v{#Version}\labwork.ico
 CloseApplications=no
 RestartApplications=no
 InfoBeforeFile=安装说明.txt
@@ -36,10 +36,10 @@ SetupLogging=yes
 Name: "chinesesimp"; MessagesFile: "..\..\packaging\ChineseSimplified.isl"
 
 [Files]
-Source: "..\target\release\labwork-preview.exe"; DestDir: "{app}\versions\{#Version}"; Flags: ignoreversion
-Source: "..\assets\labwork.ico"; DestDir: "{app}\versions\{#Version}"; Flags: ignoreversion
-Source: "..\README.md"; DestDir: "{app}\versions\{#Version}"; Flags: ignoreversion
-Source: "安装说明.txt"; DestDir: "{app}\versions\{#Version}"; Flags: ignoreversion
+Source: "..\target\release\labwork.exe"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
+Source: "..\assets\labwork.ico"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
+Source: "..\README.md"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
+Source: "安装说明.txt"; DestDir: "{app}\versions\labwork-v{#Version}"; Flags: ignoreversion
 
 [InstallDelete]
 Type: files; Name: "{group}\工作簿副本目录.lnk"
@@ -53,14 +53,14 @@ Type: files; Name: "{userprograms}\理化检测平台\卸载当前版本.lnk"; C
 #endif
 
 [Icons]
-Name: "{userdesktop}\{#DesktopName}"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "启动 labwork，托盘双击打开页面"
-Name: "{group}\启动 labwork（托盘）"; Filename: "{app}\versions\{#Version}\labwork-preview.exe"; WorkingDir: "{app}\versions\{#Version}"; IconFilename: "{app}\versions\{#Version}\labwork.ico"; Comment: "托盘双击打开页面，右键正常停止"
+Name: "{userdesktop}\{#DesktopName}"; Filename: "{app}\versions\labwork-v{#Version}\labwork.exe"; WorkingDir: "{app}\versions\labwork-v{#Version}"; IconFilename: "{app}\versions\labwork-v{#Version}\labwork.ico"; Comment: "启动 labwork，托盘双击打开页面"
+Name: "{group}\启动 labwork（托盘）"; Filename: "{app}\versions\labwork-v{#Version}\labwork.exe"; WorkingDir: "{app}\versions\labwork-v{#Version}"; IconFilename: "{app}\versions\labwork-v{#Version}\labwork.ico"; Comment: "托盘双击打开页面，右键正常停止"
 Name: "{group}\数据与月份目录"; Filename: "{code:DataDirectory}"
-Name: "{group}\安装与使用说明"; Filename: "{app}\versions\{#Version}\安装说明.txt"
+Name: "{group}\安装与使用说明"; Filename: "{app}\versions\labwork-v{#Version}\安装说明.txt"
 Name: "{group}\卸载当前版本"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\versions\{#Version}\labwork-preview.exe"; Description: "启动 labwork（托盘）"; Flags: postinstall nowait skipifsilent unchecked
+Filename: "{app}\versions\labwork-v{#Version}\labwork.exe"; Description: "启动 labwork（托盘）"; Flags: postinstall nowait skipifsilent unchecked
 
 [Code]
 var SettingsPage: TInputQueryWizardPage;
@@ -241,7 +241,7 @@ begin
       if not SaveStringToFile(DataPath + '\.labwork-rust-preview', 'isolated Rust preview {#Version}', False) then
         RaiseException('无法初始化独立数据目录。');
     Config := '{"port":' + IntToStr(StrToInt(Trim(SettingsPage.Values[0]))) + ',"data_dir":' + JsonString(DataPath) + ',"lan_ip":' + JsonString(Trim(SettingsPage.Values[2])) + ',"access_password":' + JsonString(SettingsPage.Values[3]) + '}';
-    if not SaveStringToFile(ExpandConstant('{app}\versions\{#Version}\labwork.json'), UTF8Encode(Config), False) then
+    if not SaveStringToFile(ExpandConstant('{app}\versions\labwork-v{#Version}\labwork.json'), UTF8Encode(Config), False) then
       RaiseException('无法保存平台配置。');
   end;
 end;

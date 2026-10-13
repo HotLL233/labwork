@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'target/release/labwork-preview.exe'
+EXE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'target/release/labwork.exe'
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 CALLBACK = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 user32.EnumWindows.argtypes = [CALLBACK, wintypes.LPARAM]
@@ -108,7 +108,7 @@ def main():
             probe.bind(('127.0.0.1', port))
     with tempfile.TemporaryDirectory(prefix='labwork-startup-') as folder:
         home = Path(folder)
-        exe = home / 'labwork-preview.exe'
+        exe = home / 'labwork.exe'
         shutil.copy2(EXE, exe)
         config = home / 'labwork.json'
         config.write_text(json.dumps({'port': 18806, 'data_dir': str(home / 'configured-data')}), encoding='utf-8')
