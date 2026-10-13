@@ -127,7 +127,9 @@ async fn bind_workbook(State(state):State<Shared>,Path(code):Path<String>,Query(
     months::name_project(&app.home,&code,&query.name)?;Ok(Json(result))
 }
 #[derive(Deserialize)]
-struct MonthRequest {month:String}
+struct MonthRequest {month:String,#[serde(default)] fingerprint:Option<String>}
+#[derive(Deserialize)]
+struct MonthPreviewRequest {month:String,#[serde(default)] project:Option<String>,#[serde(default)] sheet:Option<String>,#[serde(default="first_row")] start:u32}
 #[derive(Deserialize)]
 struct SourceRequest {path:Option<String>}
 #[derive(Deserialize)]
@@ -140,6 +142,7 @@ async fn import_source(State(state):State<Shared>,Path(code):Path<String>,header
 async fn bind_source(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<SourceRequest>)->Result<Json<Value>,Error> {
     let app=state.lock().unwrap();authorize(&app,&headers)?;
     let month=months::select(&app.home,&headers)?;months::writable(&app.home,&month)?;
+    pending_write(&app,&month,Some(&code))?;
     let binding=source::bind(&app,&month,&code,request.path)?;
     Ok(Json(json!({"source_link":binding})))
 }
@@ -149,12 +152,27 @@ async fn download_book(State(state):State<Shared>,Path(code):Path<String>,Query(
     Ok(([(header::CONTENT_TYPE,"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_owned()),(header::CONTENT_DISPOSITION,format!("attachment; filename=\"{code}-{}.xlsx\"",query.month))],bytes).into_response())
 }
 async fn choose_month(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<MonthRequest>)->Result<Json<Value>,Error> {
-    let app=state.lock().unwrap();authorize(&app,&headers)?;let previous=months::list(&app.home)?.last().cloned().ok_or_else(||error("缺少月份"))?;pending_write(&app,&previous,None)?;months::create(&app.home,&request.month,Some(&app))?;Ok(Json(json!({"month":request.month})))
+    let app=state.lock().unwrap();authorize(&app,&headers)?;let previous=months::list(&app.home)?.last().cloned().ok_or_else(||error("缺少月份"))?;pending_write(&app,&previous,None)?;months::create(&app.home,&request.month,&app,request.fingerprint.as_deref())?;Ok(Json(json!({"month":request.month})))
+}
+async fn preview_month(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<MonthPreviewRequest>)->Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    let previous=months::list(&app.home)?.last().cloned().ok_or_else(||error("缺少月份"))?;pending_write(&app,&previous,None)?;
+    let plan=months::plan(&app.home,&request.month,Some(&app))?;
+    let selected=if let Some(code)=request.project{plan.projects.iter().find(|p|p.code==code).ok_or_else(||error("预览项目不存在"))?}else{&plan.projects[0]};
+    let sheet=request.sheet.unwrap_or_else(||selected.sheets[0].clone());
+    if !selected.sheets.contains(&sheet){return Err(error("预览工作表不存在"));}
+    Ok(Json(json!({"month":request.month,"previous":plan.previous,"fingerprint":plan.fingerprint,"projects":plan.projects.iter().map(|p|json!({"code":p.code,"name":p.name,"sheets":p.sheets,"source_path":p.source_path})).collect::<Vec<_>>(),"project":selected.code,"sheet":sheet,"view":workbook::raw_view(&selected.bytes,&sheet,request.start).map_err(error)?})))
+}
+async fn remove_workbook(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(_):Json<Value>)->Result<Json<Value>,Error> {
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    let month=months::select(&app.home,&headers)?;months::writable(&app.home,&month)?;pending_write(&app,&month,Some(&code))?;
+    Ok(Json(months::remove_project(&app,&month,&code)?))
 }
 #[derive(Deserialize)]
 struct RuleRequest {rules:Vec<workbook::MonthRule>}
 async fn month_rules(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<RuleRequest>)->Result<Json<Value>,Error> {
     let app=state.lock().unwrap();authorize(&app,&headers)?;let month=months::select(&app.home,&headers)?;
+    pending_write(&app,&month,Some(&code))?;
     months::set_rules(&app.home,&month,&code,request.rules,Some(&app))?;Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]
@@ -183,7 +201,8 @@ fn authorize(app: &App,headers:&HeaderMap) -> Result<(),Error> {
     Ok(())
 }
 fn pending_write(app:&App,month:&str,project:Option<&str>)->Result<(),Error>{
-    let pending:bool=app.db.query_row("SELECT EXISTS(SELECT 1 FROM previews WHERE state='writing' AND json_extract(request,'$.month')=?1 AND (?2 IS NULL OR json_extract(request,'$.project')=?2))",params![month,project],|r|r.get(0)).map_err(error)?;
+    let initial=months::list(&app.home)?.first().cloned().unwrap_or_default();
+    let pending:bool=app.db.query_row("SELECT EXISTS(SELECT 1 FROM previews WHERE state='writing' AND COALESCE(NULLIF(json_extract(request,'$.month'),''),?3)=?1 AND (?2 IS NULL OR json_extract(request,'$.project')=?2))",params![month,project,initial],|r|r.get(0)).map_err(error)?;
     if pending{return Err((StatusCode::CONFLICT,Json(json!({"error":"存在尚未完成的写入，请在写入历史中重试完成后继续"}))));}Ok(())
 }
 async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):Json<Request>) -> Result<Json<Value>,Error> {
@@ -210,6 +229,7 @@ async fn commit(State(state):State<Shared>,headers:HeaderMap,Path(id):Path<Strin
 }
 fn commit_preview(app:&App,headers:&HeaderMap,id:&str)->Result<Json<Value>,Error>{
     let (raw,before,after,status,saved_rows,snapshot):(String,String,String,String,String,String)=app.db.query_row("SELECT request,before_hash,after_hash,state,rows,method_snapshot FROM previews WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|_|error("预览不存在"))?;
+    if status=="removed"{return Err((StatusCode::CONFLICT,Json(json!({"error":"此预览的项目已移除，不能再次写入；请重新导入并计算预览"}))));}
     let mut request:Request=serde_json::from_str(&raw).map_err(error)?;
     if request.month.is_empty(){request.month=months::list(&app.home)?.first().cloned().ok_or_else(||error("缺少原始月份"))?;}
     months::writable(&app.home,&request.month)?;
@@ -334,7 +354,8 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
         .route("/api/workbook/{project}/format",post(format_workbook))
         .route("/api/workbook/{project}/source",post(bind_source))
         .route("/api/workbook/{project}/source-import",post(import_source))
-        .route("/api/month",post(choose_month)).route("/api/month-rules/{project}",post(month_rules)).route("/api/book-sheet/{project}/{sheet}",get(raw_sheet))
+        .route("/api/workbook/{project}/remove",post(remove_workbook))
+        .route("/api/month",post(choose_month)).route("/api/month/preview",post(preview_month)).route("/api/month-rules/{project}",post(month_rules)).route("/api/book-sheet/{project}/{sheet}",get(raw_sheet))
         .route("/api/workbook/{project}",post(bind_workbook).layer(DefaultBodyLimit::max(import::MAX_BYTES)))
         .route("/api/catalog",get(catalog)).route("/api/sheet/{project}/{method}",get(sheet)).route("/api/preview",post(preview))
         .route("/api/commit/{id}",post(commit)).route("/api/download/{id}",get(download)).route("/api/history",get(history))

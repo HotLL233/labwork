@@ -2,12 +2,13 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const elements=new Map(),requests=[];
-function element(id){if(!elements.has(id))elements.set(id,{value:'',setAttribute(){},focus(){this.focused=true;},scrollIntoView(){this.scrolled=true;},files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
+function element(id){if(!elements.has(id))elements.set(id,{value:'',setAttribute(){},focus(){this.focused=true;},scrollIntoView(){this.scrolled=true;},showModal(){this.open=true;},close(){this.open=false;},files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
 const project={workbook_path:'C:\\Labwork\\months\\2026-10\\LAB.xlsx',code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',sheet:'水分',fields:[],params:{},columns:{}},{key:'water_diluted',name:'稀释水分',sheet:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
 const projects=[project],view={name:'原始表',columns:[],rows:[],merges:[],styles:[],sheet_names:[],last_row:3};
-let active='2026-10',writable=true,missingOnce=false,redirect,retryDone=false;
+let active='2026-10',writable=true,missingOnce=false,redirect,retryDone=false,allowConfirm=true,monthPreviewFails=false;
+const confirmations=[],blankView={...view,name:'水分',columns:[{label:'A',width:80},{label:'B',width:120}],rows:[{number:1,height:24,cells:[{ref:'A1',value:'检测日期',raw:'检测日期',style:0},{ref:'B1',value:'计算结果',raw:'计算结果',style:0}]},{number:4,height:24,cells:[{ref:'A4',value:'',raw:'',style:0},{ref:'B4',value:'',raw:'',formula:'A4*2',style:0}]}],start_row:1,next_row:101,styles:[{color:'rgb(255,0,0)'}]};
 const context=vm.createContext({
-  console,Date,LabGrid:require('./grid.js'),sessionStorage:{getItem(){return '2026-10';},setItem(){},removeItem(){}},
+  console,Date,confirm(message){confirmations.push(message);return allowConfirm;},LabGrid:require('./grid.js'),sessionStorage:{getItem(){return '2026-10';},setItem(){},removeItem(){}},
   document:{getElementById:element,querySelector(){return{content:'test-token'};},querySelectorAll(){return[];}},
   location:{assign(path){redirect=path;}},
   fetch:async(path,options)=>{requests.push({path,...options});let data;
@@ -18,8 +19,13 @@ const context=vm.createContext({
     else if(path==='/api/commit/format-pending')data={message:'已恢复格式',sheet:'原始表',rows:[],source_sync:{state:'synced',path:'C:/source/LAB.xlsx'}};
     else if(path.endsWith('/source')){const target=JSON.parse(options.body).path;project.source_link=target?{path:target,hash:'source-hash'}:null;data={ok:true};}
     else if(path.endsWith('/source-import')){const body=JSON.parse(options.body),code=path.split('/')[3];projects.push({...project,code,name:body.name,source_link:{path:body.path,hash:'imported-source-hash'}});data={code};}
+    else if(path.endsWith('/remove')){const code=path.split('/')[3];projects.splice(projects.findIndex(item=>item.code===code),1);data={ok:true};}
     else if(path==='/api/preview'){const body=JSON.parse(options.body);data={id:'preview-id',view,entries:body.entries,rows:[7],outputs:[{display:'1.234',unit:'%'}],download:'/api/preview-download'};}
     else if(path==='/api/commit/preview-id')data={message:'已写入原文件',workbook_path:project.workbook_path,sheet:'原始表',rows:[7],source_sync:{state:'synced',path:project.source_link?.path}};
+    else if(path==='/api/month/preview'){
+      if(monthPreviewFails){monthPreviewFails=false;return{ok:false,status:409,json:async()=>({error:'月模板规则尚未确认'})};}
+      const body=JSON.parse(options.body);data={month:body.month,previous:active,fingerprint:'month-fingerprint',projects:projects.map(item=>({code:item.code,name:item.name,sheets:item.sheets.map(sheet=>sheet.name),source_path:'C:/source/'+body.month+'/'+item.code+'.xlsx'})),project:body.project||projects[0].code,sheet:body.sheet||'水分',view:{...blankView,start_row:body.start,next_row:body.start===1?101:null}};
+    }
     else if(path==='/api/month'){active=JSON.parse(options.body).month;writable=active>='2026-10';data={month:active};}
     else data={fingerprint:'test-fingerprint',view,next_row:4};
     return{ok:true,status:200,json:async()=>data};
@@ -139,10 +145,35 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   assert.equal(vm.runInContext('rows[0].batch',context),'','recovery of current calculated/manual preview clears committed measurements');
   vm.runInContext("rows[0].batch='STILL-UNSUBMITTED';previewId='format-pending'",context);await vm.runInContext("retryWrite('format-pending')",context);
   assert.equal(vm.runInContext('rows[0].batch',context),'STILL-UNSUBMITTED','format recovery keeps unsubmitted measurements');
+  await vm.runInContext("setSource('C:/source/LAB.xlsx')",context);
+  assert.equal(element('source-unlink').hidden,false);
+  allowConfirm=false;let requestCount=requests.length;await element('source-unlink').onclick();assert.equal(requests.length,requestCount,'cancel unlink sends nothing');
+  allowConfirm=true;await element('source-unlink').onclick();assert.equal(projects.length,2,'unlink retains imported project');assert.equal(project.source_link,null);assert.equal(element('source-unlink').hidden,true);
+  assert(confirmations.at(-1).includes('原文件不会删除'));
+  await vm.runInContext("setSource('C:/source/LAB.xlsx')",context);
+  element('new-month').value='2100-01';
+  const originalSheet=element('sheet').innerHTML,originalRows=vm.runInContext('JSON.stringify(rows)',context),originalMethod=vm.runInContext('method.key',context);
+  const monthsBefore=requests.filter(item=>item.path==='/api/month').length;
+  await element('create-month').onclick();assert.equal(element('month-preview').open,true);assert.equal(element('month-preview-confirm').disabled,false);
+  assert(element('month-preview-sheet').innerHTML.includes('检测日期'));assert(element('month-preview-sheet').innerHTML.includes('A4*2'));
+  assert.equal(element('sheet').innerHTML,originalSheet,'template renderer does not replace entry workbook');assert.equal(vm.runInContext('JSON.stringify(rows)',context),originalRows);assert.equal(vm.runInContext('method.key',context),originalMethod);
+  assert.equal(requests.filter(item=>item.path==='/api/month').length,monthsBefore,'preview never creates month');
+  element('month-preview-close').onclick();assert.equal(vm.runInContext('monthPreview',context),null);assert.equal(element('month-preview').open,false);assert.equal(requests.filter(item=>item.path==='/api/month').length,monthsBefore,'cancel never creates month');
+  await element('create-month').onclick();element('month-preview-project').value='NEW';await element('month-preview-project').onchange();
+  assert.equal(JSON.parse(requests.at(-1).body).project,'NEW');assert.equal(vm.runInContext('monthPreview.fingerprint',context),'month-fingerprint');
+  element('month-preview-sheet-select').value='原始表';await element('month-preview-sheet-select').onchange();assert.equal(JSON.parse(requests.at(-1).body).sheet,'原始表');
+  await element('month-preview-next').onclick();assert.equal(JSON.parse(requests.at(-1).body).start,101);assert.equal(element('month-preview-next').disabled,true);
+  element('new-month').value='2100-02';element('new-month').listeners.input();assert.equal(element('month-preview-confirm').disabled,true);assert.equal(vm.runInContext('monthPreview',context),null);
+  monthPreviewFails=true;await element('create-month').onclick();assert.equal(element('month-preview-confirm').disabled,true);assert.equal(vm.runInContext('monthPreview',context),null);assert(element('month-preview-status').textContent.includes('重新预览'));
+  await element('create-month').onclick();await element('month-preview-confirm').onclick();const confirmed=requests.filter(item=>item.path==='/api/month').at(-1);assert.equal(JSON.parse(confirmed.body).fingerprint,'month-fingerprint');assert.equal(active,'2100-02');
+  await vm.runInContext("selectProject('NEW')",context);
+  allowConfirm=false;requestCount=requests.length;await element('project-remove').onclick();assert.equal(requests.length,requestCount,'cancel removal sends nothing');
+  allowConfirm=true;await element('project-remove').onclick();assert.equal(projects.length,1);assert.equal(vm.runInContext('project.code',context),'LAB');assert(confirmations.at(-1).includes('NEW'));assert(confirmations.at(-1).includes('2100-02'));
+  await element('project-remove').onclick();assert.equal(projects.length,0);assert.equal(vm.runInContext('project',context),undefined);assert.equal(element('source-panel').hidden,true);assert.equal(element('rules-panel').hidden,true);assert.equal(element('write-target').hidden,true);assert.equal(element('download-workbook').hidden,true);assert.equal(element('sheet-panel').hidden,true);assert.equal(element('sheet-select').disabled,true);assert.equal(element('project-select').disabled,true);assert.equal(element('management-view').hidden,false);
   await element('logout').onclick();
   assert.equal(requests.at(-1).path,'/api/logout');
   assert.equal(requests.at(-1).headers['X-Labwork-Token'],'test-token');assert.equal(redirect,'/login');
   await vm.runInContext('selectProject(undefined)',context);
   assert.equal(element('import-panel').open,true);
-  console.log('dynamic sheets, calculation gating, per-browser month and readonly passed');
+  console.log('dynamic sheets, calculation gating, month preview/confirm, removal and empty catalog passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

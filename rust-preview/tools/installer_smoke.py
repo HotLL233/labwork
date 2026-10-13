@@ -138,7 +138,7 @@ if args.app_id!='LabworkRustPlatform':
     assert product_registration()==original_registration,'Real product registration changed during isolated QA'
     assert (real_shortcut.read_bytes() if real_shortcut.exists() else None)==original_shortcut,'Real desktop shortcut changed during QA'
     result['real_desktop_shortcut_untouched']=True
-result.update({'app_id':args.app_id,'qa_same_source_isolated_install':args.app_id!='LabworkRustPlatform','real_registration_untouched':args.app_id!='LabworkRustPlatform','installer_path':str(installer)})
+result.update({'version':version,'executable_sha256':hashlib.sha256((root/'target/release/labwork.exe').read_bytes()).hexdigest(),'app_id':args.app_id,'qa_same_source_isolated_install':args.app_id!='LabworkRustPlatform','real_registration_untouched':args.app_id!='LabworkRustPlatform','installer_path':str(installer)})
 report_dir=args.report_dir or installer.parent
 report_dir.mkdir(parents=True,exist_ok=True)
 (report_dir/'安装验收.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')

@@ -8,7 +8,7 @@ pub struct Binding { pub path:String, pub hash:String }
 pub struct NewSource { pub month:String, pub project:String, pub path:PathBuf, pub data:Vec<u8> }
 
 fn conflict(message:impl ToString)->Error {(StatusCode::CONFLICT,Json(json!({"error":message.to_string()})))}
-fn display_path(path:&Path)->String{let text=path.to_string_lossy();text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()}
+pub fn display_path(path:&Path)->String{let text=path.to_string_lossy();text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()}
 pub fn initialize(db:&Connection)->Result<(),rusqlite::Error>{
     db.execute_batch("CREATE TABLE IF NOT EXISTS source_links(month TEXT NOT NULL,project TEXT NOT NULL,path TEXT NOT NULL COLLATE NOCASE,hash TEXT NOT NULL,PRIMARY KEY(month,project),UNIQUE(path));")
 }

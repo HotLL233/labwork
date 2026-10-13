@@ -66,6 +66,35 @@ pub fn set_rules(home:&FsPath,month:&str,code:&str,rules:Vec<MonthRule>,app:Opti
     workbook::blank_month(&bytes,&rules).map_err(error)?;
     let mut values=saved_rules(home)?;values.insert(code.into(),rules);save_json(&home.join("month-rules-v2.json"),&values)
 }
+pub fn remove_project(app:&App,month:&str,code:&str)->Result<Value,Error> {
+    writable(&app.home,month)?;
+    let working=book(&app.home,month,code)?;
+    let mut rules=saved_rules(&app.home)?;let names=names(&app.home)?;
+    let rules_path=app.home.join("month-rules-v2.json");
+    let old_rules=if rules_path.exists(){Some(fs::read(&rules_path).map_err(error)?)}else{None};
+    let archive=app.home.join("backups").join(format!("removed-{month}-{code}-{}",random_id()));
+    fs::create_dir_all(&archive).map_err(error)?;
+    save_json(&archive.join("project.json"),&json!({"month":month,"code":code,"name":names.get(code),"source_link":source::get(&app.db,month,code)?,"rules":rules.get(code),"workbook_path":working.display().to_string()}))?;
+    let archived=archive.join(format!("{code}.xlsx"));
+    let initial=list(&app.home)?.first().cloned().unwrap_or_default();
+    let transaction=app.db.unchecked_transaction().map_err(error)?;
+    let result=(||{
+        transaction.execute("DELETE FROM source_links WHERE month=?1 AND project=?2",params![month,code]).map_err(error)?;
+        transaction.execute("UPDATE previews SET state='removed' WHERE state!='done' AND COALESCE(NULLIF(json_extract(request,'$.month'),''),?3)=?1 AND json_extract(request,'$.project')=?2",params![month,code,initial]).map_err(error)?;
+        fs::rename(&working,&archived).map_err(error)?;
+        rules.remove(code);save_json(&rules_path,&rules)?;
+        transaction.commit().map_err(error)
+    })();
+    if let Err(e)=result {
+        let rollback=(||{
+            if archived.exists(){fs::rename(&archived,&working).map_err(error)?;}
+            if let Some(bytes)=old_rules {if fs::read(&rules_path).ok().as_deref()!=Some(bytes.as_slice()){let temp=rules_path.with_extension(format!("{}.tmp",random_id()));fs::write(&temp,bytes).map_err(error)?;if rules_path.exists(){workbook::replace_file(&temp,&rules_path).map_err(error)?;}else{fs::rename(temp,&rules_path).map_err(error)?;}}}
+            else if rules_path.exists(){fs::remove_file(&rules_path).map_err(error)?;}Ok::<_,Error>(())
+        })();
+        if rollback.is_err(){return Err(error(format!("移除失败，回滚文件时受阻；工作簿与关联信息备份保留在 {}，请恢复后重试",archive.display())));}return Err(e);
+    }
+    Ok(json!({"ok":true,"code":code,"month":month,"archive_path":archive.display().to_string(),"message":"已移除当前月份项目；原文件、历史月份及写入历史保留"}))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,37 +106,54 @@ mod tests {
         let old=br#"{"D006":[{"sheet":"sheet","start_row":4,"columns":["A","B"]}]}"#;
         fs::write(home.join("month-rules.json"),old).unwrap();
         assert!(saved_rules(&home).unwrap().is_empty());
-        let failure=create(&home,"2026-11",None).unwrap_err();assert!(failure.1.0["error"].as_str().unwrap().contains("确认"));
+        let failure=plan(&home,"2026-11",None).err().unwrap();assert!(failure.1.0["error"].as_str().unwrap().contains("确认"));
         assert!(!home.join("months/2026-11").exists());
         assert_eq!(fs::read(home.join("month-rules.json")).unwrap(),old);
         fs::write(home.join("month-rules-v2.json"),old).unwrap();assert!(saved_rules(&home).unwrap().contains_key("D006"));
         fs::remove_dir_all(home).unwrap();
     }
 }
-pub fn create(home:&FsPath,month:&str,app:Option<&App>)->Result<(),Error> {
+pub struct PlannedProject {pub code:String,pub name:String,pub sheets:Vec<String>,pub source_path:Option<String>,pub bytes:Vec<u8>}
+pub struct Plan {pub previous:String,pub fingerprint:String,pub projects:Vec<PlannedProject>,pub sources:Vec<source::NewSource>}
+pub fn plan(home:&FsPath,month:&str,app:Option<&App>)->Result<Plan,Error> {
     if !valid(month){return Err(error("月份格式须为YYYY-MM"));}
     let months=list(home)?;
-    if months.iter().any(|m|m==month){return Ok(());}
+    if months.iter().any(|m|m==month){return Err(error("月份已存在，请直接切换查看"));}
     let previous=months.last().ok_or_else(||error("缺少上个月份"))?;
     if month<=previous.as_str(){return Err(error("只能在最新月份之后新建，已有月份可切换查看"));}
-    let rules=saved_rules(home)?;
-    let mut generated=Vec::new();
+    let rules=saved_rules(home)?;let names=names(home)?;
+    let mut projects=Vec::new();let mut inputs=BTreeMap::new();
     for entry in fs::read_dir(directory(home,previous).join("workbooks")).map_err(error)? {
         let path=entry.map_err(error)?.path();if path.extension().is_none_or(|e|e!="xlsx"){continue;}
         let code=path.file_stem().and_then(|s|s.to_str()).ok_or_else(||error("项目名无效"))?;
-        let bytes=if let Some(app)=app{source::read(app,previous,code)?.0}else{fs::read(&path).map_err(error)?};
+        let (bytes,binding)=if let Some(app)=app{source::read(app,previous,code)?}else{(fs::read(&path).map_err(error)?,None)};
         let project_rules=rules.get(code).ok_or_else(||error(format!("请先在项目 {code} 确认月模板清空范围")))?;
         let sheets=workbook::sheet_names(&bytes).map_err(error)?;
         if sheets.len()!=project_rules.len()||sheets.iter().any(|s|!project_rules.iter().any(|r|&r.sheet==s)){return Err(error(format!("项目 {code} 表结构已改变，请重新确认月模板规则")));}
-        generated.push((path.file_name().unwrap().to_owned(),workbook::blank_month(&bytes,project_rules).map_err(error)?));
+        inputs.insert(code.to_owned(),json!({"source":hash(&bytes),"mirror":hash(&fs::read(&path).map_err(error)?),"binding":binding,"rules":project_rules}));
+        projects.push(PlannedProject{code:code.into(),name:names.get(code).cloned().unwrap_or_else(||code.into()),sheets,source_path:None,bytes:workbook::blank_month(&bytes,project_rules).map_err(error)?});
     }
-    let plans=if let Some(app)=app{source::plan_month(app,previous,month,&generated)?}else{Vec::new()};
+    if projects.is_empty(){return Err(error("当前月份没有项目，请先导入工作簿"));}
+    projects.sort_by(|a,b|a.code.cmp(&b.code));
+    let generated=projects.iter().map(|p|(std::ffi::OsString::from(format!("{}.xlsx",p.code)),p.bytes.clone())).collect::<Vec<_>>();
+    let sources=if let Some(app)=app{source::plan_month(app,previous,month,&generated)?}else{Vec::new()};
+    for project in &mut projects {project.source_path=sources.iter().find(|p|p.project==project.code).map(|p|source::display_path(&p.path));}
+    // ZIP timestamps vary per generation; validate the exact inputs and destinations instead.
+    let targets=projects.iter().map(|p|json!({"code":p.code,"name":p.name,"source_path":p.source_path})).collect::<Vec<_>>();
+    let fingerprint=hash(&serde_json::to_vec(&json!({"previous":previous,"month":month,"inputs":inputs,"projects":targets})).map_err(error)?);
+    Ok(Plan{previous:previous.clone(),fingerprint,projects,sources})
+}
+pub fn create(home:&FsPath,month:&str,app:&App,fingerprint:Option<&str>)->Result<(),Error> {
+    if !valid(month){return Err(error("月份格式须为YYYY-MM"));}
+    if list(home)?.iter().any(|m|m==month){return Ok(());}
+    let plan=plan(home,month,Some(app))?;
+    if fingerprint!=Some(plan.fingerprint.as_str()){return Err((StatusCode::CONFLICT,Json(json!({"error":"请先预览新月份模板；原文件、项目或清空规则变化后须重新预览确认"}))));}
     let stage=home.join("months").join(format!(".new-{}",random_id()));
-    fs::create_dir_all(stage.join("workbooks")).map_err(error)?;
-    for (name,bytes) in generated {fs::write(stage.join("workbooks").join(name),bytes).map_err(error)?;}
-    if let Some(app)=app {if let Err(e)=source::create_month_sources(app,&plans){return Err(e);}}
-    if let Err(e)=fs::rename(&stage,directory(home,month)){
-        if let Some(app)=app{source::rollback_month_sources(app,&plans)?;}
-        return Err(error(e));
-    }Ok(())
+    let result=(||{
+        fs::create_dir_all(stage.join("workbooks")).map_err(error)?;
+        for project in &plan.projects {fs::write(stage.join("workbooks").join(format!("{}.xlsx",project.code)),&project.bytes).map_err(error)?;}
+        source::create_month_sources(app,&plan.sources)?;
+        if let Err(e)=fs::rename(&stage,directory(home,month)){source::rollback_month_sources(app,&plan.sources)?;return Err(error(e));}Ok(())
+    })();
+    if result.is_err(){let _=fs::remove_dir_all(&stage);}result
 }

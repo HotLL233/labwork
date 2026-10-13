@@ -62,6 +62,16 @@ def main():
                 unlinked = preview('UNLINKED-MUST-NOT-WRITE')
                 assert commit(unlinked)[0] == 409
                 assert source.read_bytes() == working.read_bytes() == original
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    legacy_request = db.execute('SELECT request FROM previews WHERE id=?', [unlinked['id']]).fetchone()[0]
+                    empty_month = json.loads(legacy_request)
+                    empty_month['month'] = ''
+                    db.execute("UPDATE previews SET state='writing',request=? WHERE id=?", [json.dumps(empty_month), unlinked['id']])
+                assert server.api('/api/workbook/D006/remove', {})[0] == 409
+                assert server.api(endpoint, {'path': None})[0] == 409
+                assert server.api('/api/month-rules/D006', {'rules': catalog['monthly_rules']['D006']})[0] == 409
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    db.execute("UPDATE previews SET state='preview',request=? WHERE id=?", [legacy_request, unlinked['id']])
 
                 imported_source = folder / 'IMPORTED-理化' / month[:4] / month.replace('-', '.') / ('IMPORTED-理化-' + month.replace('-', '') + '.xlsx')
                 imported_source.parent.mkdir(parents=True)
@@ -296,7 +306,7 @@ def main():
                 assert next_source.read_bytes() == b'existing-file-must-not-be-overwritten'
                 assert not (home / 'months' / following).exists()
                 next_source.unlink()
-                server.ok('/api/month', {'month': following})
+                server.new_month(following)
                 assert next_source.is_file()
                 assert next_source.read_bytes() == (home / 'months' / following / 'workbooks/D006.xlsx').read_bytes()
                 assert source.read_bytes() == external
@@ -304,7 +314,7 @@ def main():
                 assert server.api(endpoint, {'path': str(source)}, following)[0] == 409
                 cross_year = str(int(following[:4]) + 1) + '-01'
                 next_bytes = next_source.read_bytes()
-                server.ok('/api/month', {'month': cross_year})
+                server.new_month(cross_year)
                 january_source = folder / 'D006-理化' / cross_year[:4] / cross_year.replace('-', '.') / ('D006-理化-' + cross_year.replace('-', '') + '.xlsx')
                 assert january_source.read_bytes() == (home / 'months' / cross_year / 'workbooks/D006.xlsx').read_bytes()
                 assert next_source.read_bytes() == next_bytes and source.read_bytes() == external
@@ -312,6 +322,75 @@ def main():
                 process = server.start(home, log)
                 old_project = next(p for p in server.ok('/api/catalog', month=month)['projects'] if p['code'] == 'D006')
                 assert old_project['source_link'], old_project
+
+                # Remove means archive the imported monthly mirror, never delete the original.
+                latest = server.ok('/api/catalog')
+                latest_project = next(p for p in latest['projects'] if p['code'] == 'D006')
+                latest_working = home / 'months' / cross_year / 'workbooks/D006.xlsx'
+                before_latest = latest_working.read_bytes()
+                removed_preview = server.ok('/api/preview', {'project': 'D006', 'method': 'water', 'entries': [{'date': cross_year + '-10', 'batch': 'REMOVED-PREVIEW', 'measurement': {'result': '1.234'}}]})
+                rules_path = home / 'month-rules-v2.json'
+                before_rules = rules_path.read_bytes()
+                old_history = server.ok('/api/history', month=month)
+                old_backups = {p: p.read_bytes() for p in (home / 'backups').rglob('*') if p.is_file()}
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    db.execute("UPDATE previews SET state='writing' WHERE id=?", [removed_preview['id']])
+                assert server.api('/api/workbook/D006/remove', {})[0] == 409
+                assert server.api('/api/month/preview', {'month': cross_year[:4] + '-02'})[0] == 409
+                assert server.api('/api/month', {'month': cross_year[:4] + '-02'})[0] == 409
+                assert server.api('/api/month-rules/D006', {'rules': latest['monthly_rules']['D006']})[0] == 409
+                assert latest_working.read_bytes() == january_source.read_bytes() == before_latest
+                with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                    db.execute("UPDATE previews SET state='preview' WHERE id=?", [removed_preview['id']])
+
+                # A replacement failure after mirror archival must roll back SQL and mirror.
+                handle = kernel.CreateFileW(str(rules_path), 0x80000000, 1, None, 3, 0, None)
+                assert handle != wintypes.HANDLE(-1).value, ctypes.get_last_error()
+                try:
+                    assert server.api('/api/workbook/D006/remove', {})[0] in (400, 409)
+                    assert latest_working.read_bytes() == january_source.read_bytes() == before_latest
+                    assert rules_path.read_bytes() == before_rules
+                    with closing(sqlite3.connect(home / 'preview.sqlite3')) as db:
+                        assert db.execute('SELECT state FROM previews WHERE id=?', [removed_preview['id']]).fetchone()[0] == 'preview'
+                        assert db.execute('SELECT count(*) FROM source_links WHERE month=? AND project=?', [cross_year, 'D006']).fetchone()[0] == 1
+                finally:
+                    kernel.CloseHandle(handle)
+                removed = server.ok('/api/workbook/D006/remove', {})
+                archive = Path(removed['archive_path'])
+                assert (archive / 'D006.xlsx').read_bytes() == before_latest
+                metadata = json.loads((archive / 'project.json').read_text(encoding='utf-8'))
+                assert metadata['source_link']['path'] == str(january_source) and metadata['rules']
+                assert not latest_working.exists()
+                assert 'D006' not in {p['code'] for p in server.ok('/api/catalog')['projects']}
+                assert 'D006' not in json.loads(rules_path.read_text(encoding='utf-8'))
+                assert january_source.read_bytes() == before_latest
+                assert server.ok('/api/history', month=month) == old_history
+                assert all(path.read_bytes() == data for path, data in old_backups.items())
+                assert next(p for p in server.ok('/api/catalog', month=month)['projects'] if p['code'] == 'D006')['source_link'] == old_project['source_link']
+                assert server.api('/api/workbook/D006/remove', {})[0] == 400
+                server.ok('/api/workbook/D006/source-import', {'path': str(january_source), 'name': latest_project['name']})
+                reimported = next(p for p in server.ok('/api/catalog')['projects'] if p['code'] == 'D006')
+                assert not reimported['rules_confirmed']
+                assert server.api('/api/commit/' + removed_preview['id'], {})[0] == 409
+                assert latest_working.read_bytes() == january_source.read_bytes() == before_latest
+                assert next(r for r in server.ok('/api/history') if r['id'] == removed_preview['id'])['state'] == 'removed'
+
+                missing_project = next(p for p in server.ok('/api/catalog')['projects'] if p['code'] == 'IMPORTED')
+                missing_source = Path(missing_project['source_link']['path'])
+                missing_bytes = missing_source.read_bytes()
+                missing_moved = missing_source.with_suffix('.moved')
+                missing_source.rename(missing_moved)
+                try:
+                    removed_missing = server.ok('/api/workbook/IMPORTED/remove', {})
+                    assert not any(p['code'] == 'IMPORTED' for p in server.ok('/api/catalog')['projects'])
+                    assert (Path(removed_missing['archive_path']) / 'IMPORTED.xlsx').read_bytes() == missing_bytes
+                    assert missing_moved.read_bytes() == missing_bytes
+                finally:
+                    missing_moved.rename(missing_source)
+                server.ok('/api/workbook/UPLOAD_ONLY', original)
+                upload_only = server.ok('/api/workbook/UPLOAD_ONLY/remove', {})
+                assert (Path(upload_only['archive_path']) / 'UPLOAD_ONLY.xlsx').read_bytes() == original
+                assert not any(p['code'] == 'UPLOAD_ONLY' for p in server.ok('/api/catalog')['projects'])
             except BaseException:
                 log.flush()
                 print((folder / 'server.log').read_text(encoding='utf-8', errors='replace'))
@@ -320,6 +399,7 @@ def main():
                 server.stop(process)
     assert fixture.read_bytes() == original
     report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'damaged_source_preview_and_format_rejected_without_write': True, 'grid10_damaged_preview_and_incomplete_write_rejected': True, 'valid_grid10_preview_remains_compatible': True, 'grid9_preview_cannot_replay_format_damage': True, 'grid9_incomplete_write_only_finalize_when_both_files_already_saved': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
+    report.update({'version': latest['version'], 'executable_sha256': hashlib.sha256(server.startup.EXE.read_bytes()).hexdigest(), 'remove_project_archives_mirror_and_link_metadata': True, 'remove_project_preserves_original_history_and_backups': True, 'removed_preview_cannot_replay_after_reimport': True, 'remove_missing_original_allowed': True, 'remove_unlinked_upload_allowed': True, 'remove_failure_rolls_back_mirror_rules_and_sql': True, 'pending_write_blocks_removal': True, 'pending_write_blocks_template_preview_create_and_rules': True})
     (ROOT.parent / 'runtime/source-smoke-result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
 

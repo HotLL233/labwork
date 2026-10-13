@@ -51,6 +51,16 @@ def parts(data):
         return {name: archive.read(name) for name in archive.namelist()}
 
 
+def new_month(month):
+    preview = ok('/api/month/preview', {'month': month})
+    return ok('/api/month', {'month': month, 'fingerprint': preview['fingerprint']})
+
+
+def tree_snapshot(home):
+    return {str(p.relative_to(home)): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+            for p in home.rglob('*') if p.name != '.running.lock'}
+
+
 def link_copy(code, data, folder, month):
     """Only disposable external copies may be used as writable original files."""
     path = Path(folder) / (code + '-理化') / month[:4] / month.replace('-', '.') / (code + '-理化-' + month.replace('-', '') + '.xlsx')
@@ -184,13 +194,58 @@ def main():
                 for code in projects:
                     assert len(rules[code]) == len(projects[code]['sheets'])
                     ok('/api/month-rules/' + code, {'rules': rules[code]})
-                ok('/api/month', {'month': next_month})
+                before_preview = tree_snapshot(home)
+                month_preview = ok('/api/month/preview', {'month': next_month})
+                assert month_preview['previous'] == old and month_preview['month'] == next_month
+                assert {p['code'] for p in month_preview['projects']} == set(projects)
+                assert all(p['source_path'] for p in month_preview['projects'])
+                assert month_preview['project'] == 'D006' and month_preview['sheet'] == month_preview['view']['name']
+                time.sleep(2.1)  # A new ZIP timestamp must not invalidate an unchanged template plan.
+                paged_preview = ok('/api/month/preview', {'month': next_month, 'project': 'D006', 'sheet': water['name'], 'start': 201})
+                assert paged_preview['fingerprint'] == month_preview['fingerprint']
+                assert paged_preview['view']['rows'][0]['number'] == 201
+                assert api('/api/month/preview', {'month': next_month, 'project': 'MISSING'})[0] == 400
+                assert api('/api/month/preview', {'month': next_month, 'sheet': 'MISSING'})[0] == 400
+                assert api('/api/month/preview', {'month': next_month, 'start': 0})[0] == 400
+                assert before_preview == tree_snapshot(home)
+                assert not (home / 'months' / next_month).exists()
+                for source_file in linked.values():
+                    assert source_file.read_bytes() == originals[source_file.name.split('-理化')[0] + '.xlsx']
+                    assert not source_file.parent.parent.parent.joinpath(next_month[:4], next_month.replace('-', '.')).exists()
+                assert api('/api/month', {'month': next_month})[0] == 409
+                assert api('/api/month', {'month': next_month, 'fingerprint': 'stale'})[0] == 409
+
+                # A changed source, rule or project catalogue requires another explicit preview.
+                original_source = linked['D006'].read_bytes()
+                modified = io.BytesIO()
+                with zipfile.ZipFile(modified, 'w', zipfile.ZIP_DEFLATED) as archive:
+                    for name, data in parts(original_source).items():
+                        archive.writestr(name, data)
+                    archive.writestr('docProps/month-preview-change.xml', '<external-change/>')
+                linked['D006'].write_bytes(modified.getvalue())
+                assert api('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint']})[0] == 409
+                linked['D006'].write_bytes(original_source)
+                changed_rules = json.loads(json.dumps(rules['D006']))
+                changed_rules[0]['start_row'] += 1
+                ok('/api/month-rules/D006', {'rules': changed_rules})
+                assert api('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint']})[0] == 409
+                ok('/api/month-rules/D006', {'rules': rules['D006']})
+                ok('/api/workbook/ADDED', q)
+                added_rules = ok('/api/catalog')['monthly_rules']['ADDED']
+                ok('/api/month-rules/ADDED', {'rules': added_rules})
+                assert api('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint']})[0] == 409
+                ok('/api/workbook/ADDED/remove', {})
+                assert not (home / 'months' / next_month).exists()
+                month_preview = ok('/api/month/preview', {'month': next_month})
+                ok('/api/month', {'month': next_month, 'fingerprint': month_preview['fingerprint']})
                 new_dir = home / 'months' / next_month / 'workbooks'
                 for name, data in originals.items():
                     assert (old_dir / name).read_bytes() == data
                     assert linked[Path(name).stem].read_bytes() == data
                     verify_month(data, (new_dir / name).read_bytes(), rules[Path(name).stem])
                     code = Path(name).stem
+                    matching = ok('/api/month/preview', {'month': f'{year + 1:04d}-12', 'project': code, 'sheet': projects[code]['sheets'][0]['name']})
+                    assert matching['view'] == ok('/api/book-sheet/' + code + '/s0')['view']
                     assert ok(f'/api/workbook/{code}/download?month={next_month}') == (new_dir / name).read_bytes()
                     assert ok(f'/api/workbook/{code}/download?month={old}') == data
                 for invalid in ('2026-13', '../workbooks', '1900-01'):
@@ -203,6 +258,7 @@ def main():
                 assert [record['id'] for record in ok('/api/history', month=old)] == [preview['id']]
                 assert api('/api/preview', {'project': 'D006', 'method': 'water', 'entries': [{'date': old + '-10', 'batch': 'WRONG-MONTH', 'measurement': {'result': '1'}}]})[0] == 400
                 assert api('/api/workbook/LATE', q, month=old)[0] == 409
+                assert api('/api/workbook/EF/remove', {}, month=old)[0] == 409
                 assert api('/api/preview', {'project': 'D006', 'method': 'water'}, month=old)[0] == 409
                 assert api('/api/commit/' + preview['id'], {}, month=old)[0] == 409
                 hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in new_dir.glob('*.xlsx')}
@@ -224,7 +280,7 @@ def main():
     assert hashlib.sha256(ef_path.read_bytes()).hexdigest() == ef_hash
     assert (source / 'D006.xlsx').read_bytes() == d006
     assert (source / 'Q.xlsx').read_bytes() == q
-    result = {'legacy_copy_preserved': True, 'dynamic_projects_and_chinese_names': True, 'all_sheets_browsable': True, 'raw_200_row_pagination': True, 'rules_required_atomic_month_creation': True, 'new_month_clears_confirmed_constants': True, 'formulas_styles_parameters_preserved': True, 'old_month_hash_unchanged': True, 'browser_local_month_selection': True, 'month_scoped_history_and_dates': True, 'month_download_matches_disk': True, 'download_rejects_invalid_months': True, 'old_month_writes_rejected': True, 'repeated_month_no_overwrite': True, 'backwards_month_rejected': True, 'restart_retains_latest': True, 'originals_unchanged': True}
+    result = {'version': restarted['version'], 'executable_sha256': hashlib.sha256(startup.EXE.read_bytes()).hexdigest(), 'new_month_preview_no_filesystem_writes': True, 'preview_uses_actual_blank_template_and_pagination': True, 'new_month_confirmation_requires_current_fingerprint': True, 'source_rules_catalog_changes_invalidate_month_preview': True, 'legacy_copy_preserved': True, 'dynamic_projects_and_chinese_names': True, 'all_sheets_browsable': True, 'raw_200_row_pagination': True, 'rules_required_atomic_month_creation': True, 'new_month_clears_confirmed_constants': True, 'formulas_styles_parameters_preserved': True, 'old_month_hash_unchanged': True, 'browser_local_month_selection': True, 'month_scoped_history_and_dates': True, 'month_download_matches_disk': True, 'download_rejects_invalid_months': True, 'old_month_writes_rejected': True, 'repeated_month_no_overwrite': True, 'backwards_month_rejected': True, 'restart_retains_latest': True, 'originals_unchanged': True}
     print(json.dumps(result, indent=2))
     (ROOT.parent / 'runtime/month-smoke-result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
 
