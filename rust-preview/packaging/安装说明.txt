@@ -1,8 +1,15 @@
-﻿labwork Rust 验证版 0.0.2-alpha.1-grid.9
+﻿labwork Rust 验证版 0.0.2-alpha.1-grid.10
 
 用途：在内网浏览器录入检测数据或手动结果，按原表公式计算并预览，
 确认后写入服务器本机关联的 XLSX。程序、月份数据和历史版本独立保存。
 安装包不含业务工作簿、账号或数据库。
+
+本版修复写入后格式受损：保留 XML 限定属性、冻结窗格、固定列宽、
+合并、打印设置及链接；原有空单元格保留属性，新增行沿用样式和行高。
+已受损文件需用写入前备份核对恢复，新版本不会自动重建过去丢失格式。
+原表备份在已配置数据目录的backups内，名为source-月份-项目-*.xlsx；
+先另存当前文件并核对备份，不直接覆盖后来新增的记录。
+升级后请重新计算生成预览，再确认写入。
 
 安装设置：
 默认端口18810，可自定义端口和数据目录。
@@ -70,7 +77,7 @@ month-rules-v2.json旧规则保留供回退；首次新建月份前重新确认�
 
 局域网防火墙：
 安装器不自动提权或修改防火墙。管理员按实际服务器地址和端口添加规则：
-New-NetFirewallRule -DisplayName 'labwork-grid9-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
+New-NetFirewallRule -DisplayName 'labwork-grid10-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
 请替换示例IPv4及端口；只放行指定本机私网IP及同网段来源。
 
 登录与边界：

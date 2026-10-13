@@ -123,6 +123,29 @@ def main():
                 assert source.read_bytes() == working.read_bytes() == candidate
                 assert len([p for p in (home / 'backups').rglob('*') if p.is_file()]) == backup_count
 
+                def grid9_snapshot(result, state):
+                    with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
+                        value = json.loads(db.execute('SELECT method_snapshot FROM previews WHERE id=?', [result['id']]).fetchone()[0])
+                        assert value.pop('preserves_layout') is True
+                        assert value.get('workspace_before_hash'), 'Must simulate grid.9, not a much older preview'
+                        db.execute('UPDATE previews SET method_snapshot=?,state=? WHERE id=?', [json.dumps(value), state, result['id']])
+
+                grid9_pending = preview('GRID9-PREVIEW-REJECTED')
+                grid9_snapshot(grid9_pending, 'preview')
+                assert commit(grid9_pending)[0] == 409
+                assert source.read_bytes() == working.read_bytes() == candidate
+
+                grid9_writing = preview('GRID9-WRITING-REJECTED')
+                grid9_bytes = server.ok('/api/download/' + grid9_writing['id'])
+                grid9_snapshot(grid9_writing, 'writing')
+                working.write_bytes(grid9_bytes)
+                assert commit(grid9_writing)[0] == 409
+                assert source.read_bytes() == candidate and working.read_bytes() == grid9_bytes
+                source.write_bytes(grid9_bytes)
+                assert commit(grid9_writing)[0] == 200
+                candidate = grid9_bytes
+                assert source.read_bytes() == working.read_bytes() == candidate
+
                 def legacy_snapshot(result, state):
                     with closing(sqlite3.connect(home / 'preview.sqlite3')) as db, db:
                         value = json.loads(db.execute('SELECT method_snapshot FROM previews WHERE id=?', [result['id']]).fetchone()[0])
@@ -250,7 +273,7 @@ def main():
             finally:
                 server.stop(process)
     assert fixture.read_bytes() == original
-    report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
+    report = {'isolated_source_copies_only': True, 'binding_no_write': True, 'unlinked_commit_rejected': True, 'legacy_preview_cannot_overwrite_original': True, 'grid9_preview_cannot_replay_format_damage': True, 'grid9_incomplete_write_only_finalize_when_both_files_already_saved': True, 'legacy_incomplete_write_requires_matching_saved_original': True, 'missing_original_does_not_block_reassociation': True, 'server_import_and_binding_one_step': True, 'server_import_failure_leaves_no_project_or_link': True, 'server_import_duplicate_rejected': True, 'source_is_authoritative_before_preview': True, 'source_only_previous_data_preserved': True, 'manually_entered_result_saved_to_associated_original': True, 'preview_no_write': True, 'commit_syncs_source_and_monthly_copy': True, 'source_backup_verified': True, 'retry_no_duplicate_write': True, 'interrupted_sync_recovers_and_blocks_new_writes': True, 'external_change_blocks_both_writes': True, 'binding_change_invalidates_preview': True, 'unlink_stops_source_writes': True, 'unsafe_paths_rejected': True, 'duplicate_binding_rejected': True, 'historical_month_read_only': True, 'new_month_follows_source_project_year_month_tree': True, 'cross_year_source_inheritance': True, 'existing_next_month_source_never_overwritten': True, 'old_source_preserved_on_new_month': True, 'binding_persists_restart': True, 'original_fixture_sha256': hashlib.sha256(original).hexdigest()}
     (ROOT.parent / 'runtime/source-smoke-result.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))
 

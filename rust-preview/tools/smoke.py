@@ -146,7 +146,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
             return view,value
         xml,value=sheet_cells(result)
         rr=result['rows']
-        assert [value('A'+str(r)) for r in rr]==['46305','','','','46306']
+        assert [value('A'+str(r)) for r in rr]==['20261010','','','','20261011']
         assert [value('B'+str(r)) for r in rr]==['MULTI-01','','MULTI-02','','MULTI-03']
         assert xml.find('s:mergeCells',ns) is None or all(not any(str(r) in m.attrib['ref'] for r in rr) for m in xml.find('s:mergeCells',ns))
         highlighted=[r for r in result['view']['rows'] if r['number'] in rr]
@@ -180,6 +180,9 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         props.set('date1904','1');parts['xl/workbook.xml']=ET.tostring(wb,encoding='utf-8',xml_declaration=True)
         with zipfile.ZipFile(qbook,'w',zipfile.ZIP_DEFLATED) as z:
             for name,data in parts.items():z.writestr(name,data)
+        qview=request('/api/sheet/Q/melting')
+        melting=next(method for project in catalog if project['code']=='Q' for method in project['methods'] if method['key']=='melting')
+        request('/api/workbook/Q/format',{'sheet':melting['sheet'],'range':'A'+str(qview['next_row']),'number_format':'yyyy-mm-dd','fingerprint':qview['fingerprint']})
         q1904=request('/api/preview',{'project':'Q','method':'melting','entries':[{'date':'2026-10-20','batch':'DATE1904','measurement':{'start':'150','end':'153'}}]})
         pending=[r for r in q1904['view']['rows'] if r['number'] in q1904['rows']]
         assert pending[0]['cells'][0]['value']=='2026-10-20' and pending[0]['cells'][0]['raw']=='44853'

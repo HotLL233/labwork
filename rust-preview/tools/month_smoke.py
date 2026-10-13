@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import socket
@@ -121,7 +122,7 @@ def stop(process):
 
 
 def main():
-    inventory = json.loads(Path(r'C:\labwork\tmp\physchem-research\workbook-inventory.json').read_text(encoding='utf-8-sig'))
+    inventory = json.loads(Path(os.environ.get('LABWORK_INVENTORY', r'C:\labwork\tmp\physchem-research\workbook-inventory.json')).read_text(encoding='utf-8-sig'))
     ef_path = Path(next(i['Path'] for i in inventory if i['Name'].startswith('EF-')))
     ef = ef_path.read_bytes()
     ef_hash = hashlib.sha256(ef).hexdigest()

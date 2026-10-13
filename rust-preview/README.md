@@ -1,6 +1,8 @@
-# labwork Rust + SQLite 表格验证版 0.0.2-alpha.1-grid.9
+# labwork Rust + SQLite 表格验证版 0.0.2-alpha.1-grid.10
 
 labwork 在实验室内网浏览器中录入、计算、预览并把结果写入服务器本机关联的 XLSX。Rust + SQLite 单服务器运行，无需独立客户端或外部数据库。中文安装器支持端口、数据目录、服务器私网 IPv4 和访问口令；默认端口18810，已有安装继续沿用配置。
+
+grid.10 修复写入时重建工作表 XML 丢失限定属性、原有空单元格属性和新增行格式的问题。写入沿用原有单元格样式和行高，保留冻结窗格、固定列宽、合并、打印设置及链接；数据写入只调整必要的单元格和范围。追加日期沿用原表存储方式；主动设置日期格式时将有效 YYYYMMDD 日期转为 Excel 日期序号。已有损坏文件须先用写入前备份核对恢复，此版本不会自动推断并修复过去丢失的格式；升级后重新生成预览，旧候选不能继续覆盖文件。
 
 ## 关联原文件后录入
 
@@ -45,7 +47,7 @@ EF-理化/
 安装器不自动提权或修改防火墙。管理员可按实际地址与端口放行同网段，例如：
 
 ```powershell
-New-NetFirewallRule -DisplayName 'labwork-grid9-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
+New-NetFirewallRule -DisplayName 'labwork-grid10-LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalAddress 192.168.1.50 -LocalPort 18810 -RemoteAddress LocalSubnet -Profile Any
 ```
 
 静默安装支持 `/PORT=18810 /DATADIR="D:\LabworkData" /LANIP=192.168.1.50 /ACCESSPASSFILE="D:\临时口令.txt"`。口令从UTF8文件读取，完成后删除临时文件，避免把口令放入命令行。便携包不包含业务工作簿或数据库，解压双击EXE启动；相对数据路径按EXE目录解析。

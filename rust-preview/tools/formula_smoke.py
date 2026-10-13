@@ -4,6 +4,7 @@ from decimal import Decimal, localcontext
 import hashlib
 import io
 import json
+import os
 import re
 import socket
 import tempfile
@@ -79,7 +80,7 @@ def sheet_cells(data, sheet):
 
 
 def main():
-    inventory = json.loads(Path(r'C:\labwork\tmp\physchem-research\workbook-inventory.json').read_text(encoding='utf-8-sig'))
+    inventory = json.loads(Path(os.environ.get('LABWORK_INVENTORY', r'C:\labwork\tmp\physchem-research\workbook-inventory.json')).read_text(encoding='utf-8-sig'))
     sources = {code: Path(next(item['Path'] for item in inventory if item['Name'].startswith(code + '-'))) for code in ('EF', 'K001')}
     originals = {code: path.read_bytes() for code, path in sources.items()}
     hashes = {code: hashlib.sha256(data).hexdigest() for code, data in originals.items()}

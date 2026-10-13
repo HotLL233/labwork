@@ -149,11 +149,25 @@ def run(exe):
             status,_=api('/api/workbook/FORMATQA/format',payload,previous)
             assert status==409,status
             assert (history/'FORMATQA.xlsx').read_bytes()==source
+            for code,epoch in (('DATE1900',date(1899,12,30)),('DATE1904',date(1904,1,1))):
+                output=io.BytesIO()
+                with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as archive:
+                    for name,data in parts(source).items():
+                        if name=='xl/worksheets/sheet1.xml':data=data.replace(b'</sheetData>',b'<row r="4"><c r="A4"><v>20260713</v></c></row></sheetData>')
+                        if code=='DATE1904' and name=='xl/workbook.xml':data=data.replace(b'<sheets>',b'<workbookPr date1904="1"/><sheets>')
+                        archive.writestr(name,data)
+                compact=folder/(code+'.xlsx');compact.write_bytes(output.getvalue())
+                ok('/api/workbook/'+code+'/source-import',{'path':str(compact)})
+                date_view=ok('/api/book-sheet/'+code+'/s0',month=month)
+                ok('/api/workbook/'+code+'/format',{'sheet':'格式测试','range':'A4','number_format':'yyyy/mm/dd','fingerprint':date_view['fingerprint']},month)
+                date_tree=ET.fromstring(parts(compact.read_bytes())['xl/worksheets/sheet1.xml'])
+                assert int(date_tree.find('.//s:c[@r="A4"]/s:v',NS).text)==(date(2026,7,13)-epoch).days,'Compact date did not become a valid Excel serial'
+                assert date_tree.find('.//s:c[@r="C3"]/s:v',NS).text=='1.2345','Date conversion changed a measurement'
         finally:
             if process is not None:
                 if process.poll() is None:process.terminate()
                 process.wait(timeout=10)
-        result=dict.fromkeys(['format_persisted_in_xlsx','format_persisted_to_associated_original','source_only_value_before_binding_preserved','format_sync_lock_failure_recovers_from_history','unlinked_format_rejected','style_properties_readback','formula_and_values_unchanged','unrelated_parts_unchanged','actual_target_reported','download_matches_saved','backup_matches_original','stale_fingerprint_rejected','invalid_format_and_range_rejected','history_month_read_only'],True)
+        result=dict.fromkeys(['format_persisted_in_xlsx','format_persisted_to_associated_original','source_only_value_before_binding_preserved','format_sync_lock_failure_recovers_from_history','unlinked_format_rejected','style_properties_readback','formula_and_values_unchanged','unrelated_parts_unchanged','actual_target_reported','download_matches_saved','backup_matches_original','stale_fingerprint_rejected','invalid_format_and_range_rejected','history_month_read_only','explicit_date_format_converts_compact_date_for_excel_1900_and_1904'],True)
         (ROOT.parent/'runtime/format-smoke-result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         print(json.dumps(result))
 

@@ -65,7 +65,7 @@ fn formatted_style(styles:&mut Element,index:usize,request:&FormatRequest)->Resu
         let id=intern_style(styles,"fills",fill);xf.attributes.insert("fillId".into(),id.to_string());xf.attributes.insert("applyFill".into(),"1".into());
     }
     if let Some(alignment)=&request.alignment{
-        if xf.get_child("alignment").is_none(){xf.children.push(XMLNode::Element(el("alignment")));}
+        if xf.get_child("alignment").is_none(){let position=xf.children.iter().position(|n|n.as_element().is_some_and(|e|["protection","extLst"].contains(&e.name.as_str()))).unwrap_or(xf.children.len());xf.children.insert(position,XMLNode::Element(el("alignment")));}
         xf.get_mut_child("alignment").unwrap().attributes.insert("horizontal".into(),alignment.clone());xf.attributes.insert("applyAlignment".into(),"1".into());
     }
     Ok(intern_style(styles,"cellXfs",xf))
@@ -81,8 +81,12 @@ pub fn format_cells(bytes:&[u8],request:&FormatRequest)->Result<Vec<u8>,String>{
     if request.column_width.is_some_and(|s|!s.is_finite()||!(2.0..=100.0).contains(&s)){return Err("列宽须为2至100".into());}
     if request.row_height.is_some_and(|s|!s.is_finite()||!(8.0..=200.0).contains(&s)){return Err("行高须为8至200磅".into());}
     let book=read(bytes)?;let path=target(&book,&request.sheet)?.clone();
-    let mut styles=Element::parse(Cursor::new(book.parts.get("xl/styles.xml").ok_or("工作簿缺少样式")?)).map_err(|_|"样式XML无效")?;
-    let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
+    let original=doc(&book.parts[&path])?;
+    let date_columns=original.descendants().filter(|n|n.has_tag_name("c")).filter_map(|n|coord(&attr(n,"r")).ok().filter(|(r,_)|*r<=3).and_then(|(_,c)|cell_value(n,&book.strings).ok().filter(|v|v.trim()=="日期").map(|_|c))).collect::<HashSet<_>>();
+    let column_styles=original.descendants().filter(|n|n.has_tag_name("col")).filter_map(|n|Some((n.attribute("min")?.parse::<u32>().ok()?,n.attribute("max")?.parse::<u32>().ok()?,n.attribute("style")?.parse::<usize>().ok()?))).collect::<Vec<_>>();
+    let changes_style=request.number_format.is_some()||request.font_name.is_some()||request.font_size.is_some()||request.bold.is_some()||request.font_color.is_some()||request.fill_color.is_some()||request.alignment.is_some();
+    let mut styles=editable_xml(book.parts.get("xl/styles.xml").ok_or("工作簿缺少样式")?)?;
+    let mut root=editable_xml(&book.parts[&path])?;
     let data=root.get_mut_child("sheetData").ok_or("缺少工作表数据区")?;
     let mut rows=BTreeMap::new();let mut other=Vec::new();
     for node in std::mem::take(&mut data.children){match node{XMLNode::Element(row)if row.name=="row"=>{let r=row.attributes.get("r").and_then(|r|r.parse::<u32>().ok()).filter(|r|(1..=1048576).contains(r)).ok_or("工作表行号无效")?;if rows.insert(r,row).is_some(){return Err("工作表行号重复".into());}},node=>other.push(node)}}
@@ -90,11 +94,20 @@ pub fn format_cells(bytes:&[u8],request:&FormatRequest)->Result<Vec<u8>,String>{
     for r in a.0..=b.0 {
         let row=rows.entry(r).or_insert_with(||{let mut row=el("row");row.attributes.insert("r".into(),r.to_string());row});
         if let Some(height)=request.row_height{row.attributes.insert("ht".into(),height.to_string());row.attributes.insert("customHeight".into(),"1".into());}
+        if !changes_style{continue;}
+        let row_style=row.attributes.get("s").map(|s|s.parse::<usize>()).transpose().map_err(|_|"行样式无效")?;
         for c in a.1..=b.1 {
             let reference=format!("{}{r}",letter(c));
             let position=if let Some(i)=row.children.iter().position(|n|matches!(n,XMLNode::Element(e)if e.name=="c"&&e.attributes.get("r")==Some(&reference))){i}else{let mut cell=el("c");cell.attributes.insert("r".into(),reference);row.children.push(XMLNode::Element(cell));row.children.len()-1};
             let cell=row.children[position].as_mut_element().unwrap();
-            let old=cell.attributes.get("s").map(|s|s.parse::<usize>()).transpose().map_err(|_|"单元格样式无效")?.unwrap_or(0);
+            let old=cell.attributes.get("s").map(|s|s.parse::<usize>()).transpose().map_err(|_|"单元格样式无效")?.or(row_style).or_else(||column_styles.iter().rev().find(|(min,max,_)|*min<=c&&*max>=c).map(|(_,_,s)|*s)).unwrap_or(0);
+            if r>=4&&date_columns.contains(&c)&&request.number_format.as_ref().is_some_and(|f|is_date_format(f))&&cell.get_child("f").is_none()&&cell.attributes.get("t").is_none_or(|t|t=="n"){
+                if let Some(value)=cell.get_mut_child("v"){
+                    if let Some(raw)=value.get_text().filter(|s|s.len()==8&&s.bytes().all(|b|b.is_ascii_digit())){
+                        if let Ok(date)=chrono::NaiveDate::parse_from_str(&raw,"%Y%m%d"){value.children=vec![XMLNode::Text(date_serial(date,book.date1904).to_string())];}
+                    }
+                }
+            }
             let new=if let Some(index)=cache.get(&old){*index}else{let index=formatted_style(&mut styles,old,request)?;cache.insert(old,index);index};
             cell.attributes.insert("s".into(),new.to_string());
         }
@@ -132,6 +145,26 @@ struct Book {parts:BTreeMap<String,Vec<u8>>,strings:Vec<String>,sheets:BTreeMap<
 fn text(n:Node<'_, '_>)->String {n.descendants().filter(|n|n.is_element()&&n.tag_name().name()=="t").filter_map(|n|n.text()).collect()}
 fn attr(n:Node<'_, '_>,key:&str)->String {n.attribute(key).unwrap_or("").to_owned()}
 fn doc(bytes:&[u8])->Result<Document<'_>,String>{Document::parse(std::str::from_utf8(bytes).map_err(|_|"XML编码不支持")?).map_err(|_|"工作簿XML无效".into())}
+fn editable_xml(bytes:&[u8])->Result<Element,String>{
+    let source=std::str::from_utf8(bytes).map_err(|_|"XML编码不支持")?;
+    let document=doc(bytes)?;
+    let mut root=Element::parse_with_config(Cursor::new(bytes),xmltree::ParserConfig::new().ignore_comments(false).whitespace_to_characters(true)).map_err(|_|"工作簿XML无效")?;
+    fn restore(element:&mut Element,node:Node<'_, '_>,source:&str)->Result<(),String>{
+        if element.name!=node.tag_name().name(){return Err("XML结构不一致，未写入".into());}
+        // xmltree drops attribute prefixes, including Excel's drawing and print relationships.
+        element.attributes.clear();
+        for attr in node.attributes(){
+            let name=source.get(attr.range_qname()).ok_or("XML属性名称无效")?;
+            element.attributes.insert(name.into(),attr.value().into());
+        }
+        let mut originals=node.children().filter(Node::is_element);
+        for child in element.children.iter_mut().filter_map(XMLNode::as_mut_element){
+            restore(child,originals.next().ok_or("XML结构不一致，未写入")?,source)?;
+        }
+        if originals.next().is_some(){return Err("XML结构不一致，未写入".into());}Ok(())
+    }
+    restore(&mut root,document.root_element(),source)?;Ok(root)
+}
 fn read(bytes:&[u8])->Result<Book,String>{
     if bytes.len()>20*1024*1024{return Err("工作簿超过20MB".into());}
     let mut zip=ZipArchive::new(Cursor::new(bytes)).map_err(|_|"不是有效的xlsx")?;
@@ -201,7 +234,7 @@ pub fn blank_month(bytes:&[u8],rules:&[MonthRule])->Result<Vec<u8>,String>{
         if rule.sheet.trim()=="目录" {return Err("目录仅用于浏览，不能清空".into());}
         let columns=rule.clear_columns.iter().map(|c|coord(&format!("{c}1")).and_then(|(r,col)|if r==1&&letter(col)==*c{Ok(col)}else{Err("清空列必须使用A、B等大写列名".into())})).collect::<Result<HashSet<_>,String>>()?;
         if let Ok(method)=generic_method(&book,&rule.sheet,0){for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let (row,col)=coord(reference)?;if row>=rule.data_start_row&&columns.contains(&col){return Err(format!("{}的清空范围包含固定参数{reference}，请调整起始行或列后再确认",rule.sheet));}}}}
-        let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
+        let mut root=editable_xml(&book.parts[&path])?;
         let data=root.get_mut_child("sheetData").ok_or("缺少工作表数据区")?;
         for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
             for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element).filter(|e|e.name=="c") {
@@ -506,11 +539,15 @@ pub fn generic_calculate(method:&Method,raw:&Values)->Result<Values,String>{
     let result=method.params.keys().filter_map(|k|k.strip_prefix("f:")).filter_map(|c|output.get(&format!("col_{c}")).map(|v|(c,v))).map(|(c,v)|{let n=v.parse::<bigdecimal::BigDecimal>().unwrap();format!("{c}: {}",n.with_scale_round(5,bigdecimal::RoundingMode::HalfEven))}).collect::<Vec<_>>().join("；");
     output.insert("display".into(),if result.is_empty(){"已登记".into()}else{result});output.insert("unit".into(),String::new());Ok(output)
 }
-fn el(name:&str)->Element{let mut e=Element::new(name);e.namespace=Some(MAIN.into());e}
-fn value_cell(reference:String,style:Option<String>,value:String,text:bool,formula:Option<&String>)->Element{
-    let mut cell=el("c");cell.attributes.insert("r".into(),reference);if let Some(style)=style{cell.attributes.insert("s".into(),style);}
-    if text{cell.attributes.insert("t".into(),"inlineStr".into());let mut string=el("is");let mut t=el("t");t.attributes.insert("xml:space".into(),"preserve".into());t.children.push(XMLNode::Text(value));string.children.push(XMLNode::Element(t));cell.children.push(XMLNode::Element(string));}
-    else{if let Some(formula)=formula{let mut f=el("f");f.children.push(XMLNode::Text(formula.clone()));cell.children.push(XMLNode::Element(f));}let mut v=el("v");v.children.push(XMLNode::Text(value));cell.children.push(XMLNode::Element(v));}cell
+fn el(name:&str)->Element{let mut e=Element::new(name);e.namespace=Some(MAIN.into());let mut ns=xmltree::Namespace::empty();ns.put("",MAIN);e.namespaces=Some(ns);e}
+fn value_cell(mut cell:Element,value:String,text:bool,formula:Option<&String>)->Element{
+    cell.attributes.remove("t");
+    cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="f"||e.name=="is"));
+    let mut contents=Vec::new();
+    if text{cell.attributes.insert("t".into(),"inlineStr".into());let mut string=el("is");let mut t=el("t");t.attributes.insert("xml:space".into(),"preserve".into());t.children.push(XMLNode::Text(value));string.children.push(XMLNode::Element(t));contents.push(XMLNode::Element(string));}
+    else{if let Some(formula)=formula{let mut f=el("f");f.children.push(XMLNode::Text(formula.clone()));contents.push(XMLNode::Element(f));}let mut v=el("v");v.children.push(XMLNode::Text(value));contents.push(XMLNode::Element(v));}
+    let position=cell.children.iter().position(|n|matches!(n,XMLNode::Element(e)if e.name=="extLst")).unwrap_or(cell.children.len());
+    cell.children.splice(position..position,contents);cell
 }
 fn last_data_row(book:&Book,method:&Method)->Result<u32,String>{
     let d=doc(&book.parts[target(book,&method.sheet)?])?;
@@ -536,7 +573,7 @@ fn append_start(book:&Book,method:&Method,count:u32)->Result<u32,String>{
 pub fn next_row(bytes:&[u8],method:&Method)->Result<u32,String>{append_start(&read(bytes)?,method,1)}
 pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Result<(Vec<u8>,Vec<u32>),String>{
     let book=read(bytes)?;let path=target(&book,&method.sheet)?.clone();let d=doc(&book.parts[&path])?;
-    let last=last_data_row(&book,method)?;let mut source_styles=BTreeMap::new();let mut values=BTreeMap::new();
+    let mut source_styles=BTreeMap::new();let mut values=BTreeMap::new();
     for cell in d.descendants().filter(|n|n.has_tag_name("c")){
         let reference=attr(cell,"r");let (r,_)=coord(&reference)?;let col=reference.trim_end_matches(|c:char|c.is_ascii_digit()).to_owned();let value=cell_value(cell,&book.strings)?;
         values.insert(reference.clone(),value);
@@ -546,27 +583,13 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         for cell in d.descendants().filter(|n|n.has_tag_name("c")) {let reference=attr(cell,"r");if coord(&reference)?.0==template {let style=attr(cell,"s");if !style.is_empty(){source_styles.insert(reference.trim_end_matches(|c:char|c.is_ascii_digit()).into(),style);}}}
     }
     if request.entries.len()!=outputs.len()||outputs.is_empty(){return Err("计算行数不一致".into());}
-    let (hidden,_,mut groups)=historical_labels(&d,&book,method)?;
+    let (_,_,mut groups)=historical_labels(&d,&book,method)?;
     let mut replacements=BTreeMap::new();
     let (_,formats)=styles(&book)?;
     let date_col=&method.columns["date"];
-    let source_index=source_styles.get(date_col).and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
-    if !formats.get(source_index).is_some_and(|s|is_date_format(s)) {
-        let mut styles_xml=Element::parse(Cursor::new(book.parts.get("xl/styles.xml").ok_or("缺少单元格样式")?)).map_err(|_|"样式XML无效")?;
-        let xfs=styles_xml.get_mut_child("cellXfs").ok_or("缺少单元格样式")?;
-        let count=xfs.children.iter().filter_map(|n|n.as_element()).count();
-        let mut xf=xfs.children.iter().filter_map(|n|n.as_element()).nth(source_index).ok_or("日期样式无效")?.clone();
-        xf.attributes.insert("numFmtId".into(),"14".into());xf.attributes.insert("applyNumberFormat".into(),"1".into());
-        let existing=xfs.children.iter().filter_map(|n|n.as_element()).position(|n|n==&xf);
-        source_styles.insert(date_col.clone(),existing.unwrap_or(count).to_string());
-        if existing.is_none(){
-            xfs.children.push(XMLNode::Element(xf));xfs.attributes.insert("count".into(),(count+1).to_string());
-            let mut xml=Vec::new();styles_xml.write(&mut xml).map_err(|_|"生成日期样式失败")?;replacements.insert("xl/styles.xml".to_owned(),xml);
-        }
-    }
-    let mut historical_styles=Element::parse(Cursor::new(replacements.get("xl/styles.xml").unwrap_or(&book.parts["xl/styles.xml"]))).map_err(|_|"样式XML无效")?;
-    let custom_styles=historical_styles.get_child("cellXfs").ok_or("缺少单元格样式")?.children.iter().filter_map(XMLNode::as_element).enumerate().filter_map(|(i,xf)|xf.attributes.get("numFmtId").and_then(|v|v.parse::<u32>().ok()).filter(|id|*id>=164).map(|_|i)).collect::<HashSet<_>>();
-    let mut historical_style_cache=BTreeMap::new();
+    let date_sample=values.iter().filter_map(|(reference,value)|{let (r,c)=coord(reference).ok()?;
+        (r>=3&&letter(c)==*date_col&&cell_date(value,book.date1904).is_some()).then_some((r,value))
+    }).max_by_key(|(r,_)|*r).map(|(_,v)|v.as_str());
     if !values.get(&format!("{}1",method.columns["batch"])).is_some_and(|s|s.contains('批')){return Err("表头不匹配，不能写入".into());}
     for (key,col) in &method.columns{
         if method.kind!="water_diluted"&&calc::keys(&method.kind).contains(&key.as_str())&&key!="result"&&values.get(&format!("{col}1")).is_none_or(String::is_empty){return Err("输入列缺少表头，需要核定映射".into());}
@@ -579,35 +602,10 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         let (a,b)=merge_bounds(&attr(merged,"ref"))?;
         if rows.iter().any(|r|*r>=a.0&&*r<=b.0)&&mapped.iter().any(|c|*c>=a.1&&*c<=b.1){return Err("待写入行涉及合并单元格，请核定映射".into());}
     }
-    let mut root=Element::parse(Cursor::new(&book.parts[&path])).map_err(|_|"工作表XML无效")?;
+    let mut root=editable_xml(&book.parts[&path])?;
+    let column_styles=d.descendants().filter(|n|n.has_tag_name("col")).filter_map(|n|Some((n.attribute("min")?.parse::<u32>().ok()?,n.attribute("max")?.parse::<u32>().ok()?,n.attribute("style")?.to_owned()))).collect::<Vec<_>>();
+    let column_style=|col:&str|{let number=coord(&format!("{col}1")).unwrap().1;column_styles.iter().rev().find(|(min,max,_)|*min<=number&&*max>=number).map(|(_,_,style)|style)};
     let data=root.get_mut_child("sheetData").ok_or("缺少记录区")?;
-    for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
-        if row.attributes.get("r").and_then(|r|r.parse::<u32>().ok()).is_some_and(|r|r>=4&&r<=last) {
-            for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element) {
-                let reference=cell.attributes.get("r").cloned().unwrap_or_default();
-                if hidden.contains(&reference) {
-                    cell.attributes.remove("t");cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="is"));continue;
-                }
-                if reference.trim_end_matches(|c:char|c.is_ascii_digit())==date_col&& !matches!(cell.attributes.get("t").map(String::as_str),Some("s"|"inlineStr"|"str"|"e"|"b")) {
-                    let existing=cell.attributes.get("s").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);
-                    if custom_styles.contains(&existing)&&!formats.get(existing).is_some_and(|s|is_date_format(s)){continue;}
-                    if let Some(date)=values.get(&reference).and_then(|v|cell_date(v,book.date1904)) {
-                        let serial=date_serial(date,book.date1904).to_string();
-                        if cell.get_child("f").is_none() {
-                            if let Some(v)=cell.get_mut_child("v"){v.children=vec![XMLNode::Text(serial)];}
-                            if !formats.get(existing).is_some_and(|s|is_date_format(s)){
-                                let style=if let Some(style)=historical_style_cache.get(&existing){*style}else{
-                                    let request=FormatRequest{sheet:method.sheet.clone(),range:reference.clone(),number_format:Some("yyyy-mm-dd".into()),font_name:None,font_size:None,bold:None,font_color:None,fill_color:None,alignment:None,column_width:None,row_height:None};
-                                    let style=formatted_style(&mut historical_styles,existing,&request)?;historical_style_cache.insert(existing,style);style
-                                };cell.attributes.insert("s".into(),style.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if !historical_style_cache.is_empty(){let mut xml=Vec::new();historical_styles.write(&mut xml).map_err(|_|"保存历史日期样式失败")?;replacements.insert("xl/styles.xml".into(),xml);}
     let mut expected_labels=Vec::new();
     for (index,row_no) in rows.iter().enumerate(){
         let entry=&request.entries[index];
@@ -615,7 +613,23 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
         raw.extend(outputs[index].clone());
         let date=chrono::NaiveDate::parse_from_str(&entry.date,"%Y-%m-%d").map_err(|_|"日期无效")?;
         let repeated=groups.observe(&entry.date,&entry.batch,*row_no);
-        let date_value=if repeated.0 {String::new()}else{date_serial(date,book.date1904).to_string()};
+        let template=data.children.iter().filter_map(XMLNode::as_element).filter(|e|e.name=="row"&&e.attributes.get("r").and_then(|r|r.parse::<u32>().ok()).is_some_and(|r|r>=3&&r<*row_no)).max_by_key(|e|e.attributes["r"].parse::<u32>().unwrap()).cloned();
+        let old=data.children.iter().position(|n|matches!(n,XMLNode::Element(e)if e.name=="row"&&e.attributes.get("r")==Some(&row_no.to_string())));
+        let mut row=if let Some(position)=old{match data.children.remove(position){XMLNode::Element(row)=>row,_=>unreachable!()}}else{
+            let mut row=el("row");if let Some(template)=&template{
+                row.prefix=template.prefix.clone();row.namespaces=template.namespaces.clone();
+                row.attributes=template.attributes.iter().filter(|(key,_)|!matches!(key.as_str(),"r"|"spans"|"uid")&&!key.ends_with(":uid")).map(|(key,value)|(key.clone(),value.clone())).collect();
+            }row
+        };row.attributes.insert("r".into(),row_no.to_string());
+        let date_ref=format!("{date_col}{row_no}");
+        let target_date=row.children.iter().filter_map(XMLNode::as_element).find(|e|e.name=="c"&&e.attributes.get("r")==Some(&date_ref));
+        let template_date=template.as_ref().and_then(|r|r.children.iter().filter_map(XMLNode::as_element).find(|c|c.name=="c"&&c.attributes.get("r").is_some_and(|r|r.trim_end_matches(|c:char|c.is_ascii_digit())==date_col)));
+        let date_cell=target_date.or(template_date);
+        let date_style=date_cell.and_then(|cell|cell.attributes.get("s")).or_else(||row.attributes.get("s")).or_else(||column_style(date_col)).or_else(||if date_cell.is_none(){source_styles.get(date_col)}else{None});
+        let format=formats.get(date_style.and_then(|s|s.parse::<usize>().ok()).unwrap_or(0)).map(String::as_str).unwrap_or("General");
+        let (date_value,date_text)=if repeated.0{(String::new(),false)}else if is_date_format(format)||date_sample.is_some_and(|v|v.parse::<i64>().is_ok()&&v.len()!=8){(date_serial(date,book.date1904).to_string(),false)}else if date_sample.is_some_and(|v|v.contains('-')||v.contains('/')||v.contains('.')){
+            (date.format(if date_sample.unwrap().contains('/') {"%Y/%m/%d"}else if date_sample.unwrap().contains('.') {"%Y.%m.%d"}else{"%Y-%m-%d"}).to_string(),true)
+        }else{(date.format("%Y%m%d").to_string(),false)};
         let batch_value=if repeated.1 {String::new()}else{entry.batch.clone()};
         expected_labels.push((date_value.clone(),batch_value.clone()));
         raw.extend(Values::from([("date".into(),date_value),("batch".into(),batch_value),("notes".into(),entry.notes.clone())]));
@@ -623,20 +637,26 @@ pub fn append(bytes:&[u8],method:&Method,request:&Request,outputs:&[Values])->Re
             let template=method.params.get("template_row").and_then(|r|r.parse::<i32>().ok()).ok_or("缺少原公式定位行")?;
             method.params.iter().filter_map(|(k,f)|k.strip_prefix("f:").map(|c|(c,f))).map(|(c,f)|Ok((format!("col_{c}"),crate::formula::translate(f,*row_no as i32-template,0)?))).collect::<Result<BTreeMap<_,_>,String>>()?
         }else{calc::formulas(&method.kind,&method.columns,*row_no,&method.params)};
-        let old=data.children.iter().position(|n|matches!(n,XMLNode::Element(e)if e.name=="row"&&e.attributes.get("r")==Some(&row_no.to_string())));
-        let mut row=if let Some(position)=old{match data.children.remove(position){XMLNode::Element(row)=>row,_=>unreachable!()}}else{el("row")};row.attributes.insert("r".into(),row_no.to_string());
-        let target_styles=row.children.iter().filter_map(XMLNode::as_element).filter(|e|e.name=="c").filter_map(|e|Some((e.attributes.get("r")?.clone(),e.attributes.get("s")?.clone()))).collect::<BTreeMap<_,_>>();
-        row.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="c"&&e.attributes.get("r").and_then(|r|coord(r).ok()).is_some_and(|(_,c)|mapped.contains(&c))));
         let mut cols=method.columns.iter().collect::<Vec<_>>();cols.sort_by_key(|(_,col)|(col.len(),col.as_str()));
-        for (key,col) in cols{if let Some(value)=raw.get(key){let text=key=="batch"||key=="notes"||method.fields.iter().any(|f|f.key==*key&&f.input_type=="text");let reference=format!("{col}{row_no}");let style=target_styles.get(&reference).or_else(||source_styles.get(col)).filter(|s|!s.is_empty()).cloned();row.children.push(XMLNode::Element(value_cell(reference,style,value.clone(),text,formulas.get(key))));}}
-        row.children.sort_by_key(|n|match n{XMLNode::Element(c)if c.name=="c"=>c.attributes.get("r").and_then(|r|coord(r).ok()).map(|(_,c)|c).unwrap_or(0),_=>0});
+        for (key,col) in cols{if let Some(value)=raw.get(key){
+            let text=key=="batch"||key=="notes"||(key=="date"&&date_text)||method.fields.iter().any(|f|f.key==*key&&f.input_type=="text");let reference=format!("{col}{row_no}");
+            let old=row.children.iter().position(|n|matches!(n,XMLNode::Element(e)if e.name=="c"&&e.attributes.get("r")==Some(&reference)));
+            let cell=if let Some(position)=old{match row.children.remove(position){XMLNode::Element(cell)=>cell,_=>unreachable!()}}else{
+                let mut cell=el("c");cell.attributes.insert("r".into(),reference);
+                let prototype=template.as_ref().and_then(|r|r.children.iter().filter_map(XMLNode::as_element).find(|c|c.name=="c"&&c.attributes.get("r").is_some_and(|r|r.trim_end_matches(|c:char|c.is_ascii_digit())==col.as_str())));
+                let style=if let Some(cell)=prototype{cell.attributes.get("s")}else if row.attributes.contains_key("s")||column_style(col).is_some(){None}else{source_styles.get(col)};
+                if let Some(style)=style.filter(|s|!s.is_empty()){cell.attributes.insert("s".into(),style.clone());}cell
+            };
+            row.children.push(XMLNode::Element(value_cell(cell,value.clone(),text,formulas.get(key))));
+        }}
+        row.children.sort_by_key(|n|match n{XMLNode::Element(c)if c.name=="c"=>(0,c.attributes.get("r").and_then(|r|coord(r).ok()).map(|(_,c)|c).unwrap_or(0)),_=>(1,0)});
         data.children.push(XMLNode::Element(row));
     }
     data.children.sort_by_key(|n|match n{XMLNode::Element(e)if e.name=="row"=>e.attributes.get("r").and_then(|s|s.parse::<u32>().ok()).unwrap_or(0),_=>0});
     if let Some(dimension)=root.get_mut_child("dimension"){
-        let old=dimension.attributes.get("ref").cloned().unwrap_or("A1".into());let (_,old_col)=coord(old.split(':').next_back().unwrap())?;
-        let new_col=method.columns.values().map(|c|coord(&format!("{c}1")).map(|(_,col)|col)).collect::<Result<Vec<_>,_>>()?.into_iter().max().unwrap_or(1).max(old_col);
-        dimension.attributes.insert("ref".into(),format!("A1:{}{}",letter(new_col),rows.last().unwrap()));
+        let old=dimension.attributes.get("ref").cloned().unwrap_or("A1".into());let (old_start,old_end)=merge_bounds(&old)?;
+        let new_col=method.columns.values().map(|c|coord(&format!("{c}1")).map(|(_,col)|col)).collect::<Result<Vec<_>,_>>()?.into_iter().max().unwrap_or(1).max(old_end.1);
+        dimension.attributes.insert("ref".into(),format!("{}{}:{}{}",letter(old_start.1.min(mapped.iter().copied().min().unwrap_or(1))),old_start.0.min(rows[0]),letter(new_col),old_end.0.max(*rows.last().unwrap())));
     }
     let mut xml=Vec::new();root.write(&mut xml).map_err(|_|"生成工作表失败")?;
     replacements.insert(path.clone(),xml);
@@ -662,6 +682,22 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 mod tests {
     use super::*;
     #[test]
+    fn editable_xml_preserves_qualified_attributes_and_whitespace(){
+        let source=format!(r#"<x:worksheet xmlns:x="{MAIN}" xmlns:a="urn:a" xmlns:b="urn:b" a:id="first" b:id="second"><x:sheetData><x:row r="1"><x:c r="A1" t="inlineStr"><x:is><x:t xml:space="preserve"> </x:t></x:is><x:extLst a:id="kept"/></x:c><x:extLst/></x:row></x:sheetData></x:worksheet>"#);
+        let mut root=editable_xml(source.as_bytes()).unwrap();
+        let row=root.get_mut_child("sheetData").unwrap().get_mut_child("row").unwrap();
+        let cell=row.children.remove(0).as_element().unwrap().clone();
+        row.children.insert(0,XMLNode::Element(value_cell(cell," ".into(),true,None)));
+        row.children.insert(1,XMLNode::Element(el("c")));
+        let mut result=Vec::new();root.write(&mut result).unwrap();let d=doc(&result).unwrap();
+        assert_eq!(d.root_element().attribute(("urn:a","id")),Some("first"));
+        assert_eq!(d.root_element().attribute(("urn:b","id")),Some("second"));
+        assert!(d.descendants().filter(Node::is_element).all(|n|n.tag_name().namespace()==Some(MAIN)));
+        let cell=d.descendants().find(|n|n.has_tag_name("c")).unwrap();
+        assert_eq!(cell.children().filter(Node::is_element).map(|n|n.tag_name().name()).collect::<Vec<_>>(),vec!["is","extLst"]);
+        let t=cell.descendants().find(|n|n.has_tag_name("t")).unwrap();assert_eq!(t.text(),Some(" "));assert_eq!(t.attribute(("http://www.w3.org/XML/1998/namespace","space")),Some("preserve"));
+    }
+    #[test]
     fn formatting_preserves_values_and_reuses_styles(){
         let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
         for (name,xml) in [
@@ -683,6 +719,10 @@ mod tests {
         let repeated=read(&format_cells(&candidate,&request).unwrap()).unwrap();
         for section in ["fonts","fills","cellXfs","numFmts"]{let count=|b:&Book|{let d=doc(&b.parts["xl/styles.xml"]).unwrap();d.descendants().find(|n|n.has_tag_name(section)).unwrap().children().filter(Node::is_element).count()};assert_eq!(count(&book),count(&repeated),"{section}");}
         for format in ["yyyy/mm/dd","yyyy年m月d日","General"]{let mut date=request.clone();date.range="A4".into();date.number_format=Some(format.into());let bytes=format_cells(&source,&date).unwrap();let view=raw_view(&bytes,"测试",1).unwrap();let text=view["rows"].as_array().unwrap().iter().flat_map(|r|r["cells"].as_array().unwrap()).find(|c|c["ref"]=="A4").unwrap()["value"].as_str().unwrap().to_owned();assert_eq!(text,match format{"yyyy/mm/dd"=>"2026/10/08","yyyy年m月d日"=>"2026年10月8日",_=>"46303"});}
+        let mut compact=ZipWriter::new(Cursor::new(Vec::new()));
+        for (name,bytes) in &read(&source).unwrap().parts{compact.start_file(name,SimpleFileOptions::default()).unwrap();if name=="xl/worksheets/sheet1.xml"{compact.write_all(String::from_utf8_lossy(bytes).replace("46303","20261008").as_bytes()).unwrap();}else{compact.write_all(bytes).unwrap();}}
+        let compact=compact.finish().unwrap().into_inner();let mut date=request.clone();date.range="A4".into();date.number_format=Some("yyyy/mm/dd".into());
+        let formatted=read(&format_cells(&compact,&date).unwrap()).unwrap();let d=doc(&formatted.parts["xl/worksheets/sheet1.xml"]).unwrap();assert_eq!(cell_value(d.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some("A4")).unwrap(),&formatted.strings).unwrap(),"46303");
         for range in ["A0","XFE1","B4:A1","A1:A10001","A1:GS1"]{let mut bad=request.clone();bad.range=range.into();assert!(format_cells(&source,&bad).is_err(),"{range}");}
         for (key,value) in [("font_size",json!(73)),("row_height",json!(7)),("column_width",json!(1)),("font_color",json!("red")),("number_format",json!("0.000000000")),("alignment",json!("justify")),("font_name",json!(""))]{let mut bad=serde_json::to_value(&request).unwrap();bad[key]=value;assert!(format_cells(&source,&serde_json::from_value(bad).unwrap()).is_err(),"{key}");}
     }
@@ -798,7 +838,9 @@ mod tests {
         let (candidate,rows)=append(&source,method,&request,&outputs).unwrap();assert_eq!(rows,vec![25,26]);
         let book=read(&candidate).unwrap();let d=doc(&book.parts["xl/worksheets/sheet1.xml"]).unwrap();
         let cell=|reference:&str|d.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();
-        for reference in ["A5","B5","B7","A25","B25"] {assert_eq!(cell_value(cell(reference),&book.strings).unwrap(),"");}
+        for reference in ["A25","B25"] {assert_eq!(cell_value(cell(reference),&book.strings).unwrap(),"");}
+        for (reference,value) in [("A5","20261008"),("B5","LOT-1"),("B7","LOT-1")]{assert_eq!(cell_value(cell(reference),&book.strings).unwrap(),value);}
+        assert_eq!(book.parts["xl/styles.xml"],read(&source).unwrap().parts["xl/styles.xml"],"record append must not rewrite styles");
         assert_eq!(cell_value(cell("B6"),&book.strings).unwrap(),"LOT-1");
         assert_eq!(cell_value(cell("B26"),&book.strings).unwrap(),"LOT-1");
         assert_eq!(cell_value(cell("A26"),&book.strings).unwrap(),"46305");
@@ -806,6 +848,17 @@ mod tests {
         assert_eq!(cell_value(cell("C5"),&book.strings).unwrap(),"2");
         assert_eq!(cell_value(cell("J25"),&book.strings).unwrap(),"99");
         assert_eq!(cell("J25").parent().unwrap().attribute("ht"),Some("30"));
+        for row_style in [true,false]{
+            let source_book=read(&source).unwrap();let mut root=editable_xml(&source_book.parts["xl/worksheets/sheet1.xml"]).unwrap();
+            let data=root.get_mut_child("sheetData").unwrap();data.children.retain(|n|!n.as_element().is_some_and(|r|r.attributes.get("r").is_some_and(|r|r.parse::<u32>().unwrap()>4)));
+            let row=data.children.iter_mut().filter_map(XMLNode::as_mut_element).find(|r|r.attributes.get("r").is_some_and(|r|r=="4")).unwrap();
+            row.children.retain(|n|!n.as_element().is_some_and(|c|c.attributes.get("r").is_some_and(|r|r=="A4")));
+            if row_style{row.attributes.extend([("s".into(),"1".into()),("customFormat".into(),"1".into())]);}else{let mut cols=el("cols");let mut col=el("col");col.attributes.extend([("min".into(),"1".into()),("max".into(),"1".into()),("style".into(),"1".into())]);cols.children.push(XMLNode::Element(col));root.children.insert(0,XMLNode::Element(cols));}
+            let mut sheet=Vec::new();root.write(&mut sheet).unwrap();let mut fixture=ZipWriter::new(Cursor::new(Vec::new()));
+            for (name,part) in &source_book.parts{fixture.start_file(name,SimpleFileOptions::default()).unwrap();if name=="xl/worksheets/sheet1.xml"{fixture.write_all(&sheet).unwrap();}else if name=="xl/styles.xml"{fixture.write_all(format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>"#).as_bytes()).unwrap();}else{fixture.write_all(part).unwrap();}}
+            let (candidate,rows)=append(&fixture.finish().unwrap().into_inner(),method,&request,&outputs).unwrap();assert_eq!(rows,vec![5,6]);let book=read(&candidate).unwrap();let d=doc(&book.parts["xl/worksheets/sheet1.xml"]).unwrap();
+            for (reference,value) in [("A5","46304"),("A6","46305")]{let cell=d.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell.attribute("s"),None,"new date must inherit row or column style");assert_eq!(cell_value(cell,&book.strings).unwrap(),value);}
+        }
         let format:FormatRequest=serde_json::from_value(json!({"sheet":method.sheet,"range":"A4","number_format":"yyyy/mm/dd"})).unwrap();
         let formatted=format_cells(&source,&format).unwrap();
         let (appended,_)=append(&formatted,method,&request,&outputs).unwrap();

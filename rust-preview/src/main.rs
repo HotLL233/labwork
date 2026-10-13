@@ -199,7 +199,7 @@ async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):
     let view=workbook::view(&candidate,&method,&rows).map_err(error)?;
     let id=random_id();
     let created=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-    let mut snapshot=json!(&method);snapshot["source_link"]=json!(binding);snapshot["workspace_before_hash"]=json!(workspace_before_hash);
+    let mut snapshot=json!(&method);snapshot["source_link"]=json!(binding);snapshot["workspace_before_hash"]=json!(workspace_before_hash);snapshot["preserves_layout"]=json!(true);
     app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,'preview',?8)",params![id,created,serde_json::to_string(&request).unwrap(),serde_json::to_string(&outputs).unwrap(),hash(&bytes),hash(&candidate),serde_json::to_string(&rows).unwrap(),serde_json::to_string(&snapshot).unwrap()]).map_err(error)?;
     fs::write(app.home.join("previews").join(format!("{id}.xlsx")),candidate).map_err(error)?;
     Ok(Json(json!({"id":id,"entries":request.entries,"outputs":outputs,"rows":rows,"view":view,"state":"preview","download":format!("/api/download/{id}")})))
@@ -224,9 +224,10 @@ fn commit_preview(app:&App,headers:&HeaderMap,id:&str)->Result<Json<Value>,Error
     let result=|message:&str|Json(json!({"state":"done","message":message,"workbook_path":book.display().to_string(),"sheet":sheet,"rows":saved_rows,"source_sync":if let Some(ref b)=binding{json!({"state":"synced","path":b.path,"message":"已同步关联原文件"})}else{json!({"state":"unlinked","message":"未关联原文件，仅保存月份副本"})},"download":format!("/api/workbook/{}/download?month={}",request.project,request.month)}));
     if status=="done" {return Ok(result("已写入当前月份工作簿，无重复追加"));}
     if binding.is_none(){return Err((StatusCode::CONFLICT,Json(json!({"error":"请先在工作簿管理中关联服务器原文件，再重新计算并预览；本次未写入任何文件"}))));}
-    if status=="preview"&&snapshot.get("workspace_before_hash").is_none(){return Err((StatusCode::CONFLICT,Json(json!({"error":"这是旧版生成的预览，请重新计算并预览后写入；本次未覆盖任何文件"}))));}
+    let old_preview=snapshot.get("workspace_before_hash").is_none()||snapshot["preserves_layout"]!=true;
+    if status=="preview"&&old_preview{return Err((StatusCode::CONFLICT,Json(json!({"error":"这是旧版生成的预览，请重新计算并预览后写入；本次未覆盖任何文件"}))));}
     source::check(&app,&request.month,&request.project,binding.as_ref(),&after)?;
-    if status=="writing"&&snapshot.get("workspace_before_hash").is_none()&&hash(&fs::read(&binding.as_ref().unwrap().path).map_err(error)?)!=after{
+    if status=="writing"&&old_preview&&(current!=after||hash(&fs::read(&binding.as_ref().unwrap().path).map_err(error)?)!=after){
         return Err((StatusCode::CONFLICT,Json(json!({"error":"旧版写入尚未完成原文件同步，需要人工核对原文件、月份副本和写前备份；所有文件已保留，本次未覆盖原文件"}))));
     }
     if status=="writing" && current==after {
@@ -265,7 +266,7 @@ async fn format_workbook(State(state):State<Shared>,Path(code):Path<String>,head
     let view=workbook::raw_view(&bytes,&request.format.sheet,1).map_err(error)?;
     let id=random_id();let created=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     let saved_request=json!({"month":month,"project":code,"method":"__format__","operation":"format","sheet":request.format.sheet,"range":request.format.range,"entries":[]});
-    let snapshot=json!({"sheet":request.format.sheet,"source_link":binding,"workspace_before_hash":workspace_before_hash});
+    let snapshot=json!({"sheet":request.format.sheet,"source_link":binding,"workspace_before_hash":workspace_before_hash,"preserves_layout":true});
     fs::write(app.home.join("previews").join(format!("{id}.xlsx")),&bytes).map_err(error)?;
     app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,'[]',?4,?5,'[]','preview',?6)",params![id,created,saved_request.to_string(),hash(&before),hash(&bytes),snapshot.to_string()]).map_err(error)?;
     let mut result=commit_preview(&app,&headers,&id)?.0;
