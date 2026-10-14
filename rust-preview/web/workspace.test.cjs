@@ -4,7 +4,7 @@ const vm=require('node:vm');
 const elements=new Map(),requests=[];
 function element(id){if(!elements.has(id))elements.set(id,{value:'',setAttribute(){},focus(){this.focused=true;},scrollIntoView(){this.scrolled=true;},showModal(){this.open=true;},close(){this.open=false;},files:[],hidden:false,disabled:false,innerHTML:'',textContent:'',classList:{toggle(){},remove(){}},listeners:{},addEventListener(type,handler){this.listeners[type]=handler;},querySelectorAll(){return[];},querySelector(){return null;},reset(){}});return elements.get(id);}
 const project={workbook_path:'C:\\Labwork\\months\\2026-10\\LAB.xlsx',code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',sheet:'水分',fields:[],params:{},columns:{}},{key:'water_diluted',name:'稀释水分',sheet:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
-const projects=[project],view={name:'原始表',columns:[],rows:[],merges:[],styles:[],sheet_names:[],last_row:3};
+const projects=[project],view={name:'原始表',columns:[{label:'A',width:80}],rows:Array.from({length:40},(_,index)=>({number:index+1,height:24,cells:[{ref:'A'+(index+1),value:index===19?'中间历史记录':String(index+1),raw:String(index+1),style:0}]})),merges:[],styles:[{}],sheet_names:[],last_row:40};
 let active='2026-10',writable=true,missingOnce=false,redirect,retryDone=false,allowConfirm=true,monthPreviewFails=false,monthTargetConflict=false,monthConfirmFails=false;
 const confirmations=[],blankView={...view,name:'水分',columns:[{label:'A',width:80},{label:'B',width:120}],rows:[{number:1,height:24,cells:[{ref:'A1',value:'检测日期',raw:'检测日期',style:0},{ref:'B1',value:'计算结果',raw:'计算结果',style:0}]},{number:4,height:24,cells:[{ref:'A4',value:'',raw:'',style:0},{ref:'B4',value:'',raw:'',formula:'A4*2',style:0}]}],start_row:1,next_row:101,styles:[{color:'rgb(255,0,0)'}]};
 const context=vm.createContext({
@@ -32,6 +32,11 @@ const context=vm.createContext({
   }
 });
 vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
+function assertRenderedRows(stage){
+  const html=element('sheet').innerHTML,numbers=[...html.matchAll(/<tr\b([^>]*)>([\s\S]*?)<\/tr>/g)].filter(match=>!match[1].includes('draft-row')).flatMap(match=>{const row=match[2].match(/<td class="row-num">(\d+)<\/td>/);return row?[Number(row[1])]:[];});
+  assert.deepEqual(numbers,Array.from({length:40},(_,index)=>index+1),stage);
+  assert(html.includes('中间历史记录'));assert(!html.includes('中间历史记录已折叠'));
+}
 (async()=>{
   await new Promise(resolve=>setImmediate(resolve));
   assert(requests.some(request=>request.path==='/api/book-sheet/LAB/s0?start=1'));
@@ -48,6 +53,7 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   element('project-code').value='LAB';vm.runInContext('workbookStatus()',context);
   assert.equal(element('import-workbook').disabled,true);
   await vm.runInContext("selectSheet('s1')",context);
+  assertRenderedRows('original method view');
   assert(requests.some(request=>request.path==='/api/sheet/LAB/water'));
   assert.equal(element('browse-note').hidden,true);
   assert.equal(element('method-choice').hidden,false);
@@ -70,7 +76,9 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   assert(element('write-target-note').textContent.includes('文件不存在'));delete project.source_error;
   vm.runInContext('renderSource();updateFormatState()',context);
   await element('calculate').onclick();assert.equal(element('commit').disabled,false);
+  assertRenderedRows('calculation preview');
   await element('commit').onclick();assert(element('write-receipt-text').textContent.includes('已写入原文件：C:/source/LAB.xlsx'));
+  assertRenderedRows('refresh after confirmation');
   await vm.runInContext('setSource(null)',context);
   await vm.runInContext("changeMonth('2026-09')",context);
   const catalogRequest=requests.filter(request=>request.path==='/api/catalog').at(-1);
@@ -111,6 +119,7 @@ vm.runInContext(fs.readFileSync(__dirname+'/app.js','utf8'),context);
   format=vm.runInContext('formatRequest()',context);assert.equal(format.number_format,'0.000%');assert.equal(format.font_color,'#123456');
   vm.runInContext("rows[0].batch='UNSAVED';previewId='stale'",context);
   await element('format-form').onsubmit({preventDefault(){}});
+  assertRenderedRows('refresh after format save');
   assert.equal(vm.runInContext('rows[0].batch',context),'UNSAVED');assert.equal(vm.runInContext('previewId',context),null);
   assert(requests.some(request=>request.path==='/api/workbook/LAB/format'));
   vm.runInContext("showWriteReceipt({workbook_path:'C:/data/LAB.xlsx',sheet:'原始表',rows:[7,8],download:'/api/book/download'})",context);assert(element('write-receipt-text').textContent.includes('7–8'));assert.equal(element('write-receipt-download').href,'/api/book/download');

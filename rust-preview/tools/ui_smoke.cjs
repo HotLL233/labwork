@@ -49,6 +49,15 @@ fs.mkdirSync(output,{recursive:true});
     assert(method,'EF must have a usable formula method');
     const sheet=project.sheets.find(sheet=>sheet.name.trim()===method.sheet.trim());
     assert(sheet,'EF method must map to an imported sheet');
+    async function assertContinuousSheet(stage,view){
+      if(!view){const response=await page.request.get(base+'/api/sheet/EF/'+method.key);assert.equal(response.status(),200);view=(await response.json()).view;}
+      const expected=Array.from({length:view.last_row},(_,index)=>index+1);
+      assert.deepEqual(view.rows.map(row=>row.number),expected,stage+' API');
+      await page.waitForFunction(expected=>{const actual=[...document.querySelectorAll('#sheet tbody tr:not(.draft-row) .row-num')].map(node=>Number(node.textContent));return actual.length===expected.length&&actual.every((number,index)=>number===expected[index]);},expected);
+      const numbers=await page.locator('#sheet').evaluate(table=>[...table.querySelectorAll('tbody tr:not(.draft-row) .row-num')].map(node=>Number(node.textContent)));
+      assert.deepEqual(numbers,expected,stage+' DOM');
+      assert(!(await page.locator('#sheet').textContent()).includes('中间历史记录已折叠'));
+    }
     for(const width of [390,320,768,1440]){
       await page.setViewportSize({width,height:width<700?844:1000});
       await page.locator('#nav-entry').click();
@@ -64,6 +73,7 @@ fs.mkdirSync(output,{recursive:true});
       if(await page.locator('#method-choice').isVisible())await page.locator('#method-select').selectOption(method.key);
       await page.locator('#sheet-panel').waitFor({state:'visible'});
       assert(!(await page.locator('#import-form').isVisible()),'import form must not occupy entry view');
+      await assertContinuousSheet('original method view '+width);
       assert(await page.locator('#calculate').isVisible(),'calculate action must be visible');
       assert(await page.locator('#commit').isVisible(),'write action must be visible');
       assert(await page.locator('#calculate').isEnabled());
@@ -109,6 +119,7 @@ fs.mkdirSync(output,{recursive:true});
         const [preview]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/api/preview')&&response.request().method()==='POST'),page.locator('#calculate').click()]);
         assert.equal(preview.status(),200,preview.status()===200?"":await preview.text());
         await page.waitForFunction(()=>!document.querySelector('#commit').disabled);
+        await assertContinuousSheet('calculation preview',(await preview.json()).view);
         await page.screenshot({path:path.join(output,'preview-390.png'),fullPage:true});
         const batch=await page.locator(`${panel} input[data-key="batch"]`).first().inputValue();
         await page.locator('#format-panel > summary').click();
@@ -120,6 +131,7 @@ fs.mkdirSync(output,{recursive:true});
         const [formatted]=await Promise.all([page.waitForResponse(response=>response.url().endsWith('/format')&&response.request().method()==='POST'),page.locator('#format-save').click()]);
         assert.equal(formatted.status(),200,formatted.status()===200?"":await formatted.text());
         await page.waitForFunction(()=>document.querySelector('#format-status').textContent.includes('已保存'));
+        await assertContinuousSheet('refresh after format save');
         assert.equal(await page.locator(`${panel} input[data-key="batch"]`).first().inputValue(),batch,'format save must retain unsaved entries');
         assert(await page.locator('#commit').isDisabled(),'format save must invalidate old preview');
         const formattedRow=await page.locator('#sheet').evaluate(table=>{const row=[...table.querySelectorAll('tbody tr')].find(row=>row.querySelector('.row-num')?.textContent==='3');return{height:parseFloat(row.style.height),font:row.querySelector('[data-ref="C3"]').style.fontFamily};});
@@ -140,6 +152,7 @@ fs.mkdirSync(output,{recursive:true});
         const [commit]=await Promise.all([page.waitForResponse(response=>response.url().includes('/api/commit/')&&response.request().method()==='POST'),page.locator('#commit').click()]);
         assert.equal(commit.status(),200,commit.status()===200?"":await commit.text());
         await page.waitForFunction(()=>document.querySelector('#action-state').textContent.includes('已写入'));
+        await assertContinuousSheet('refresh after confirmation');
         assert.match(await page.locator('#sheet td[data-ref="A4"]').textContent(),/^\d{4}\/\d{2}\/\d{2}$/,'confirmed append must retain custom date format');
         assert(await page.locator('#write-receipt').isVisible());
         assert((await page.locator('#write-receipt-text').textContent()).includes('已写入原文件：'+sourcePath));
@@ -290,7 +303,7 @@ fs.mkdirSync(output,{recursive:true});
     assert.deepEqual(await (await page.request.get(base+'/api/history',{headers:{'X-Labwork-Month':oldMonth}})).json(),historyBefore,'prior month history retained');
     await page.screenshot({path:path.join(output,'empty-catalog-390.png'),fullPage:true});
     assert.deepEqual(errors,[],'browser JavaScript errors');
-    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,version:catalog.version,executable_sha256:crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),viewports:[390,320,768,1440],project:'EF',method:method.key,manual_source_write:true,checks:['login_form','responsive_no_page_overflow','mobile_selectors','separate_management','unlinked_confirm_disabled','unlinked_format_disabled','user_manually_binds_current_project','binding_no_duplicate_project','source_link_no_write','binding_retains_unsubmitted_rows','actual_source_import','actual_format_save','font_row_height_reloaded','custom_date_survives_append','unsaved_entries_preserved','format_invalidates_preview','original_target_visible','actual_preview','calculated_original_matches_preview','manual_original_matches_preview','unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','month_preview_preserves_entry_state','no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders','no_js_errors']},null,2));
+    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,version:catalog.version,executable_sha256:crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),viewports:[390,320,768,1440],project:'EF',method:method.key,manual_source_write:true,checks:['login_form','responsive_no_page_overflow','mobile_selectors','separate_management','unlinked_confirm_disabled','unlinked_format_disabled','user_manually_binds_current_project','binding_no_duplicate_project','source_link_no_write','binding_retains_unsubmitted_rows','actual_source_import','actual_format_save','font_row_height_reloaded','custom_date_survives_append','unsaved_entries_preserved','format_invalidates_preview','original_target_visible','actual_preview','sheet_rows_continuous_after_preview_commit_format','calculated_original_matches_preview','manual_original_matches_preview','unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','month_preview_preserves_entry_state','no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders','no_js_errors']},null,2));
     console.log('UI smoke passed; screenshots and result.json saved.');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -445,7 +445,7 @@ pub fn raw_view(bytes:&[u8],sheet:&str,start_row:u32)->Result<Value,String>{
 fn view_inner(bytes:&[u8],sheet:&str,method:Option<&Method>,highlight:&[u32],page:Option<u32>)->Result<Value,String>{
     let book=read(bytes)?;let path=target(&book,sheet)?;let d=doc(&book.parts[path])?;let (css,num)=styles(&book)?;
     let explicit_formats=book.parts.get("xl/styles.xml").map(|b|doc(b).map(|d|d.descendants().find(|n|n.has_tag_name("cellXfs")).map(|n|n.children().filter(Node::is_element).enumerate().filter_map(|(i,n)|n.attribute("numFmtId").and_then(|v|v.parse::<u32>().ok()).filter(|id|*id>=164).map(|_|i)).collect::<HashSet<_>>()).unwrap_or_default())).transpose()?.unwrap_or_default();
-    let (hidden,context)=if let Some(method)=method{let (hidden,context,_)=historical_labels(&d,&book,method)?;(hidden,context)}else{(HashSet::new(),BTreeMap::new())};
+    let hidden=if let Some(method)=method{historical_labels(&d,&book,method)?.0}else{HashSet::new()};
     let date_columns=d.descendants().filter(|n|n.has_tag_name("c")).filter_map(|n|coord(&attr(n,"r")).ok().filter(|(r,_)|*r<=3).and_then(|(_,c)|cell_value(n,&book.strings).ok().filter(|v|v.trim()=="日期").map(|_|c))).collect::<HashSet<_>>();
     let mut all=BTreeMap::new();let mut heights=BTreeMap::new();let mut max_col=1;let mut max_row=3;
     for row in d.descendants().filter(|n|n.has_tag_name("row")){
@@ -473,11 +473,9 @@ fn view_inner(bytes:&[u8],sheet:&str,method:Option<&Method>,highlight:&[u32],pag
     }
     let mut merges=Vec::new();
     for n in d.descendants().filter(|n|n.has_tag_name("mergeCell")){let (a,b)=merge_bounds(&attr(n,"ref"))?;merges.push(json!({"row":a.0,"col":a.1,"rowspan":b.0-a.0+1,"colspan":b.1-a.1+1}));}
-    let tail=max_row.saturating_sub(12).max(4);let mut selected=if let Some(start)=page{(start..=max_row.min(start+199)).collect::<std::collections::BTreeSet<_>>()}else{(1..=3).chain(tail..=max_row).chain(highlight.iter().copied()).collect::<std::collections::BTreeSet<_>>()};
-    // Keep group headers visible when the tail starts halfway through a day's results.
-    for row in selected.clone(){if let Some(anchors)=context.get(&row){selected.extend(anchors);}}
-    let rows=selected.iter().map(|r|json!({"number":r,"height":heights.get(r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(*r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
-    Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"tail_start":tail,"sheet_names":book.order,"start_row":page.unwrap_or(1),"next_row":page.filter(|start|start+199<max_row).map(|start|start+200),"truncated":page.is_some_and(|start|start>1||start+199<max_row)||full_columns>max_col,"columns_truncated":full_columns>max_col}))
+    let selected=if let Some(start)=page{start..=max_row.min(start+199)}else{1..=max_row};
+    let rows=selected.map(|r|json!({"number":r,"height":heights.get(&r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(&r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
+    Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"sheet_names":book.order,"start_row":page.unwrap_or(1),"next_row":page.filter(|start|start+199<max_row).map(|start|start+200),"truncated":page.is_some_and(|start|start>1||start+199<max_row)||full_columns>max_col,"columns_truncated":full_columns>max_col}))
 }
 fn expanded_formulas(d:&Document<'_>)->Result<BTreeMap<(u32,u32),String>,String>{
     let mut masters=BTreeMap::new();let mut formulas=BTreeMap::new();
@@ -915,6 +913,8 @@ mod tests {
             ("xl/worksheets/sheet2.xml",format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>目录</t></is></c></row></sheetData></worksheet>"#)),
         ] {zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(xml.as_bytes()).unwrap();}
         let source=zip.finish().unwrap().into_inner();
+        let original_view=super::view(&source,method,&[]).unwrap();
+        assert_eq!(original_view["rows"].as_array().unwrap().iter().map(|r|r["number"].as_u64().unwrap()).collect::<Vec<_>>(),(1..=25).collect::<Vec<_>>(),"original preview must include every row, including blank and middle rows");
         let view=view(&source,method,&[5,7,8,9,10]).unwrap();
         let cell=|reference:&str|view["rows"].as_array().unwrap().iter().flat_map(|r|r["cells"].as_array().unwrap()).find(|c|c["ref"]==reference).unwrap();
         assert_eq!(cell("A5")["value"],"");assert_eq!(cell("A5")["raw"],"20261008");
@@ -924,6 +924,8 @@ mod tests {
         let request:Request=serde_json::from_value(json!({"project":"D006","method":"chloride","entries":[{"date":"2026-10-09","batch":"LOT-1","measurement":{"mass":"1","volume":"1"}},{"date":"2026-10-10","batch":"LOT-1","measurement":{"mass":"2","volume":"2"}}]})).unwrap();
         let outputs=request.entries.iter().map(|e|calc::calculate(&method.kind,&e.measurement,&method.params).unwrap()).collect::<Vec<_>>();
         let (candidate,rows)=append(&source,method,&request,&outputs).unwrap();assert_eq!(rows,vec![25,26]);
+        let appended_view=super::view(&candidate,method,&rows).unwrap();
+        assert_eq!(appended_view["rows"].as_array().unwrap().iter().map(|r|r["number"].as_u64().unwrap()).collect::<Vec<_>>(),(1..=26).collect::<Vec<_>>(),"write preview must include every historical and appended row");
         let book=read(&candidate).unwrap();let d=doc(&book.parts["xl/worksheets/sheet1.xml"]).unwrap();
         let cell=|reference:&str|d.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();
         for reference in ["A25","B25"] {assert_eq!(cell_value(cell(reference),&book.strings).unwrap(),"");}

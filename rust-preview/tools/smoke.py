@@ -39,6 +39,9 @@ def fails(code,path,body=None,headers=None):
 def members(path):
     with zipfile.ZipFile(path) as z:return {n:z.read(n) for n in z.namelist()}
 
+def continuous(view,stage):
+    assert [row['number'] for row in view['rows']]==list(range(1,view['last_row']+1)),stage
+
 with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
     home=Path(folder)/'isolated'
     home.mkdir();(home/'.labwork-rust-preview').write_text('test')
@@ -70,6 +73,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         for project in catalog:
             for method in project['methods']:
                 view=request(f"/api/sheet/{project['code']}/{method['key']}")
+                continuous(view['view'],method['key']+' original')
                 assert view['view']['columns'] and view['view']['styles']
                 if project['code']=='D006' and method['key']=='chloride':
                     historical=next(c for r in view['view']['rows'] for c in r['cells'] if c['ref']=='A4')
@@ -79,6 +83,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                 _,expected=calculate(method['kind'],raw,method['params'])
                 before=members(working/f"{project['code']}.xlsx")
                 result=request('/api/preview',payload)
+                continuous(result['view'],method['key']+' calculation preview')
                 assert result['outputs'][0]['display']==expected['display'],(method['key'],result['outputs'],expected)
                 if 'result' in expected:assert Decimal(result['outputs'][0]['result'])==Decimal(expected['result'])
                 assert len(result['rows'])==2
@@ -107,6 +112,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
                 assert retry['state']=='done' and retry['workbook_path']==receipt['workbook_path']
                 assert members(working/f"{project['code']}.xlsx")==after
                 assert members(linked[project['code']])==after,'Confirmed result missing from associated original'
+                continuous(request(f"/api/sheet/{project['code']}/{method['key']}")['view'],method['key']+' after confirmation')
                 total+=1;last_payload=payload
         assert total==14
         fails(403,'/api/preview',last_payload,{'X-Labwork-Token':'wrong'})
@@ -160,6 +166,7 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         assert request('/api/sheet/D006/water')['next_row']==again['rows'][0]
         # A full 200-row candidate must show every pending result, not just the last 13.
         many=request('/api/preview',{'project':'D006','method':'water','entries':[{'date':'2026-10-12','batch':f'BULK-{i//2:03d}','measurement':raw} for i in range(200)]})
+        continuous(many['view'],'200-row candidate')
         assert len(many['rows'])==200 and len([r for r in many['view']['rows'] if r['number'] in many['rows']])==200
         fails(400,'/api/preview',dict(payload,entries=payload['entries']*41))
         invalid=dict(payload['entries'][0],date='2026-02-30')
@@ -183,11 +190,12 @@ with tempfile.TemporaryDirectory(prefix='labwork-rust-test-') as folder:
         qview=request('/api/sheet/Q/melting')
         melting=next(method for project in catalog if project['code']=='Q' for method in project['methods'] if method['key']=='melting')
         request('/api/workbook/Q/format',{'sheet':melting['sheet'],'range':'A'+str(qview['next_row']),'number_format':'yyyy-mm-dd','fingerprint':qview['fingerprint']})
+        continuous(request('/api/sheet/Q/melting')['view'],'after format save')
         q1904=request('/api/preview',{'project':'Q','method':'melting','entries':[{'date':'2026-10-20','batch':'DATE1904','measurement':{'start':'150','end':'153'}}]})
         pending=[r for r in q1904['view']['rows'] if r['number'] in q1904['rows']]
         assert pending[0]['cells'][0]['value']=='2026-10-20' and pending[0]['cells'][0]['raw']=='44853'
         assert original_hashes=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in source.glob('*.xlsx')}
-        result={'methods':total,'associated_originals_match_confirmed_results':True,'decimal_parity':True,'unrelated_zip_members_preserved':True,'preview_no_write':True,'idempotence':True,'concurrent_conflict':True,'interrupted_finalize_recovery':True,'csrf_and_host_check':True,'sqlite_snapshots':True,'originals_unchanged':True,'multi_batch_grouping':True,'date_display_and_single_labels':True,'continued_group_blanks':True,'all_200_pending_rows_visible':True,'invalid_batch_atomic_rejection':True,'date1904_and_style_reuse':True,'historical_compact_dates':True}
+        result={'version':active['version'],'executable_sha256':hashlib.sha256(exe.read_bytes()).hexdigest(),'method_views_show_all_rows':True,'methods':total,'associated_originals_match_confirmed_results':True,'decimal_parity':True,'unrelated_zip_members_preserved':True,'preview_no_write':True,'idempotence':True,'concurrent_conflict':True,'interrupted_finalize_recovery':True,'csrf_and_host_check':True,'sqlite_snapshots':True,'originals_unchanged':True,'multi_batch_grouping':True,'date_display_and_single_labels':True,'continued_group_blanks':True,'all_200_pending_rows_visible':True,'invalid_batch_atomic_rejection':True,'date1904_and_style_reuse':True,'historical_compact_dates':True}
         (root.parent/'runtime/rust-smoke-result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
         print(json.dumps(result,indent=2))
     finally:
