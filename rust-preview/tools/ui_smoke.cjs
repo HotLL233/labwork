@@ -58,6 +58,7 @@ fs.mkdirSync(output,{recursive:true});
       assert.deepEqual(numbers,expected,stage+' DOM');
       assert(!(await page.locator('#sheet').textContent()).includes('中间历史记录已折叠'));
     }
+    const headerLayout=[];
     for(const width of [390,320,768,1440]){
       await page.setViewportSize({width,height:width<700?844:1000});
       await page.locator('#nav-entry').click();
@@ -78,10 +79,19 @@ fs.mkdirSync(output,{recursive:true});
       assert(await page.locator('#commit').isVisible(),'write action must be visible');
       assert(await page.locator('#calculate').isEnabled());
       assert(await page.locator('#write-target').isVisible());
+      assert(await page.locator('#write-target-path').isVisible(),'original source path must remain visible');
       if(width===390){assert((await page.locator('#write-target-path').textContent()).includes('尚未关联'));assert(await page.locator('#link-source-shortcut').isVisible());assert(await page.locator('#format-save').isDisabled());}
       else assert.equal(await page.locator('#write-target-path').textContent(),sourcePath);
       const overflow=await page.evaluate(()=>({page:document.documentElement.scrollWidth,viewport:innerWidth}));
       assert(overflow.page<=overflow.viewport+1,JSON.stringify({width,...overflow}));
+      const inputSelector=width<700?'#mobile-entry input':'#entry input';
+      assert(await page.locator(inputSelector).first().isVisible(),'data entry must remain directly visible');
+      const layout=await page.evaluate(selector=>({viewport:innerWidth,first_input_top:document.querySelector(selector).getBoundingClientRect().top+scrollY,preview_top:document.querySelector('#sheet-panel').getBoundingClientRect().top+scrollY,details_count:document.querySelectorAll('details').length,main_controls_outside_details:[selector,'#calculate','#commit','#write-target'].every(selector=>!document.querySelector(selector).closest('details'))}),inputSelector);
+      assert(layout.details_count<=6,'compact layout must not add disclosure panels');
+      assert(layout.main_controls_outside_details,'entry, actions and write target must stay outside disclosure panels');
+      if(width===1440)assert(layout.first_input_top<=400,'desktop first input starts too low: '+layout.first_input_top);
+      if(width===390)assert(await page.locator('#write-target-note').isVisible(),'unlinked source guidance must remain visible');
+      headerLayout.push(layout);
       await page.screenshot({path:path.join(output,`entry-${width}.png`),fullPage:true});
       await page.locator('#format-panel > summary').click();
       const formatOverflow=await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1);
@@ -303,7 +313,7 @@ fs.mkdirSync(output,{recursive:true});
     assert.deepEqual(await (await page.request.get(base+'/api/history',{headers:{'X-Labwork-Month':oldMonth}})).json(),historyBefore,'prior month history retained');
     await page.screenshot({path:path.join(output,'empty-catalog-390.png'),fullPage:true});
     assert.deepEqual(errors,[],'browser JavaScript errors');
-    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,version:catalog.version,executable_sha256:crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),viewports:[390,320,768,1440],project:'EF',method:method.key,manual_source_write:true,checks:['login_form','responsive_no_page_overflow','mobile_selectors','separate_management','unlinked_confirm_disabled','unlinked_format_disabled','user_manually_binds_current_project','binding_no_duplicate_project','source_link_no_write','binding_retains_unsubmitted_rows','actual_source_import','actual_format_save','font_row_height_reloaded','custom_date_survives_append','unsaved_entries_preserved','format_invalidates_preview','original_target_visible','actual_preview','sheet_rows_continuous_after_preview_commit_format','calculated_original_matches_preview','manual_original_matches_preview','unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','month_preview_preserves_entry_state','no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders','no_js_errors']},null,2));
+    fs.writeFileSync(path.join(output,'result.json'),JSON.stringify({ok:true,version:catalog.version,executable_sha256:crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'),viewports:[390,320,768,1440],project:'EF',method:method.key,manual_source_write:true,header_layout:headerLayout,checks:['login_form','responsive_no_page_overflow','compact_header_preserves_visible_entry_actions_and_target','mobile_selectors','separate_management','unlinked_confirm_disabled','unlinked_format_disabled','user_manually_binds_current_project','binding_no_duplicate_project','source_link_no_write','binding_retains_unsubmitted_rows','actual_source_import','actual_format_save','font_row_height_reloaded','custom_date_survives_append','unsaved_entries_preserved','format_invalidates_preview','original_target_visible','actual_preview','sheet_rows_continuous_after_preview_commit_format','calculated_original_matches_preview','manual_original_matches_preview','unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','month_preview_preserves_entry_state','no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders','no_js_errors']},null,2));
     console.log('UI smoke passed; screenshots and result.json saved.');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -83,11 +83,11 @@ if (native_excel.get('ok') is not True or native_excel.get('version')!=version
     or native_excel.get('fixed_column_widths_preserved') is not True
     or native_excel.get('frozen_panes_preserved') is not True):
     raise RuntimeError('Native Excel open and original layout regression did not pass for this executable')
-ui_directory=repo/'runtime/ui-qa/v0.0.6'
+ui_directory=repo/'runtime/ui-qa/v0.0.7'
 if any(path.suffix.lower() in ('.xlsx','.sqlite3') for path in ui_directory.rglob('*') if path.is_file()):raise RuntimeError('Browser evidence contains business files or a database')
 ui=json.loads((ui_directory/'result.json').read_text(encoding='utf-8'))
 if ui.get('ok') is not True or ui.get('version')!=version or ui.get('executable_sha256')!=exe_sha256 or ui.get('manual_source_write') is not True:raise RuntimeError('Browser regression did not pass for this executable')
-if not set(('unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','sheet_rows_continuous_after_preview_commit_format')).issubset(ui.get('checks',[])):raise RuntimeError('Project management, continuous rows and month preview browser regression did not pass')
+if not set(('unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','sheet_rows_continuous_after_preview_commit_format','compact_header_preserves_visible_entry_actions_and_target')).issubset(ui.get('checks',[])):raise RuntimeError('Project management, compact header, continuous rows and month preview browser regression did not pass')
 if not set(('no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders')).issubset(ui.get('checks',[])):raise RuntimeError('Automatic template preview browser regression did not pass')
 generic_source=json.loads((repo/'runtime/generic-workbook-regression.json').read_text(encoding='utf-8'))
 if (generic_source.get('version')!=version or generic_source.get('executable_sha256')!=exe_sha256 or generic_source.get('calculation_and_write_roundtrips')!=124
@@ -104,7 +104,7 @@ for report in (checks,monthly,auth,formula,imports,lan,startup,format_checks,sou
 if subprocess.check_output(['git','status','--porcelain'],cwd=repo,text=True).strip():raise RuntimeError('Commit the reviewed release source before packaging')
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=repo,text=True).strip()
-if branch!='fix/v0.0.6-continuous-preview':raise RuntimeError('Package from the isolated v0.0.6 branch only')
+if branch!='fix/v0.0.7-compact-header':raise RuntimeError('Package from the isolated v0.0.7 branch only')
 release.mkdir(parents=True)
 portable=release/f'labwork-v{version}-Windows-x64.zip'
 with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
@@ -117,7 +117,7 @@ with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
 with zipfile.ZipFile(portable) as z:
     if any(n.endswith(('.xlsx','.sqlite3')) for n in z.namelist()):raise RuntimeError('Business data found in portable package')
 subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-v{version}-Source.zip'),commit],cwd=repo,check=True)
-for source in [root/'README.md',repo/'docs/版本更新-v0.0.6.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/unsupported-formula-preservation.json',repo/'runtime/installer-settings-regression.json',repo/'runtime/installer-firewall-regression.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
+for source in [root/'README.md',repo/'docs/版本更新-v0.0.7.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/unsupported-formula-preservation.json',repo/'runtime/installer-settings-regression.json',repo/'runtime/installer-firewall-regression.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
     shutil.copyfile(source,release/source.name)
 shutil.copytree(ui_directory,release/'browser-qa')
 (release/'generic-workbook-regression.json').write_text(json.dumps(generic,indent=2),encoding='utf-8')

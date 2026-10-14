@@ -61,6 +61,7 @@ function assertRenderedRows(stage){
   assert.equal(requests.at(-1).path,'/api/sheet/LAB/water_diluted');
   assert.equal(vm.runInContext('selectedSheet.key',context),'s1');
   assert.equal(element('source-path').value,'','no automatic or hard-coded association');
+  assert.equal(element('write-target-note').hidden,false,'unlinked source guidance stays visible');
   vm.runInContext("rows[0].batch='COMPUTED'",context);await element('calculate').onclick();
   assert.equal(vm.runInContext('previewId',context),'preview-id');
   assert.equal(element('commit').disabled,true,'unlinked preview cannot be confirmed');
@@ -71,9 +72,10 @@ function assertRenderedRows(stage){
   assert.equal(vm.runInContext('method.key',context),'water_diluted','bind retains method choice');
   assert.equal(vm.runInContext('rows[0].batch',context),'COMPUTED');assert.equal(vm.runInContext('previewId',context),null);
   assert.equal(element('write-target-path').textContent,'C:/source/LAB.xlsx');
+  assert.equal(element('write-target-note').hidden,true,'valid source path does not need a repeated explanation');
   project.source_error='文件不存在';vm.runInContext('renderSource();updateFormatState()',context);
   assert.equal(element('link-source-shortcut').hidden,false);assert.equal(element('commit').disabled,true);assert.equal(element('format-save').disabled,true);
-  assert(element('write-target-note').textContent.includes('文件不存在'));delete project.source_error;
+  assert(element('write-target-note').textContent.includes('文件不存在'));assert.equal(element('write-target-note').hidden,false,'source errors stay visible');delete project.source_error;
   vm.runInContext('renderSource();updateFormatState()',context);
   await element('calculate').onclick();assert.equal(element('commit').disabled,false);
   assertRenderedRows('calculation preview');
@@ -81,6 +83,7 @@ function assertRenderedRows(stage){
   assertRenderedRows('refresh after confirmation');
   await vm.runInContext('setSource(null)',context);
   await vm.runInContext("changeMonth('2026-09')",context);
+  assert.equal(element('message').hidden,true,'month selection already shows a successful switch');
   const catalogRequest=requests.filter(request=>request.path==='/api/catalog').at(-1);
   assert.equal(catalogRequest.headers['X-Labwork-Month'],'2026-09');
   assert.equal(element('browse-note').hidden,false);
@@ -128,7 +131,7 @@ function assertRenderedRows(stage){
   assert(element('calculation-values').innerHTML.includes('固定参数 B2'));
   assert(!element('calculation-values').innerHTML.includes('template_row'));
   assert(!element('calculation-values').innerHTML.includes('f:E'));
-  assert.equal(element('action-title').textContent,'手工录入与写入');
+  assert.equal(element('calculate').textContent,'预览写入');
   assert(!vm.runInContext("input(0,'appearance')",context).includes('inputmode="decimal"'));
   assert.equal(element('sheet-select').value,'s0');
   element('format-height').value='28';assert.equal(vm.runInContext('formatRequest()',context).row_height,28);

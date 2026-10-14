@@ -110,8 +110,8 @@ async function selectSheet(key,start=1,methodKey,draftRows){
   const choices=project.methods.filter(item=>item.sheet?.trim()===selectedSheet.name.trim()||item.key===selectedSheet.method_key);
   method=choices.find(item=>item.key===(methodKey||selectedSheet.method_key))||choices[0]||null;
   $('method-choice').hidden=choices.length<2;$('method-select').innerHTML=choices.map(item=>`<option value="${escape(item.key)}" ${item.key===method?.key?'selected':''}>${escape(item.name)}</option>`).join('');
-  $('sheet-select').value=key;$('calculate').textContent=previewLabel();$('action-title').textContent=method?.kind==='manual'?'手工录入与写入':'计算与写入';$('sample').hidden=!method?.fields.some(field=>field.sample);
-  $('title').textContent=selectedSheet.name;$('breadcrumb').textContent=`${project.name} / ${code}`;
+  $('sheet-select').value=key;$('calculate').textContent=previewLabel();$('sample').hidden=!method?.fields.some(field=>field.sample);
+  $('title').textContent=selectedSheet.name;
   document.querySelectorAll('#methods button').forEach(button=>button.classList.toggle('active',button.dataset.key===key));
   const editable=!!method&&writable();
   document.querySelectorAll('.calc-only').forEach(el=>el.hidden=!editable);
@@ -138,7 +138,7 @@ async function selectProject(code,sheetKey,methodKey,draftRows){
   renderSource();
   $('download-workbook').hidden=!project;
   if(project)$('download-workbook').href='/api/workbook/'+encodeURIComponent(project.code)+'/download?month='+encodeURIComponent(selectedMonth);
-  if(!project){$('methods').innerHTML='';$('title').textContent='请关联服务器工作簿';$('breadcrumb').textContent='工作簿';$('browse-note').hidden=true;$('import-panel').open=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
+  if(!project){$('methods').innerHTML='';$('title').textContent='请关联服务器工作簿';$('browse-note').hidden=true;$('import-panel').open=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
   $('methods').innerHTML=(project.sheets||[]).map(item=>`<button data-key="${escape(item.key)}">${escape(item.name)}</button>`).join('');
   $('sheet-select').innerHTML=project.sheets.map(item=>`<option value="${escape(item.key)}">${escape(item.name)}</option>`).join('');
   $('methods').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.key));
@@ -159,7 +159,8 @@ function renderSource(){
   $('project-remove-note').textContent=writable()?'删除当前月份的导入项目和关联；服务器原文件、历史记录及备份保留。':'历史月份只读；请切换到最新月份管理导入项目。';
   $('source-status').textContent=project?.source_error?`关联原文件暂不可用：${project.source_error}。请核对路径和文件状态，或重新指定原文件路径；确认写入已停用。`:link?`已关联：${link.path}。录入、预览和确认写入以此文件为准。`:'此项目是上传副本，尚未关联原文件。填写原文件路径后，本项目将按原文件读取和写入，不会新增重复项目。';
   $('write-target-path').textContent=link?.path||'尚未关联原文件';
-  $('write-target-note').textContent=project?.source_error?`原文件暂不可用：${project.source_error}。请核对或更换关联路径；不会改写工作副本来替代原文件写入。`:link?'确认写入将追加本次计算或手工录入结果到上述原文件；自动备份并检查冲突。':`上传副本：${project?.workbook_path||''}。请先关联服务器上的原文件，才能确认写入。`;
+  $('write-target-note').hidden=linked();
+  $('write-target-note').textContent=project?.source_error?`原文件暂不可用：${project.source_error}。请核对或更换关联路径；不会改写工作副本来替代原文件写入。`:linked()?'':`上传副本：${project?.workbook_path||''}。请先关联服务器上的原文件，才能确认写入。`;
   $('link-source-shortcut').hidden=!project||linked();$('link-source-shortcut').textContent=project?.source_error?'核对关联路径':'关联原文件';
   $('link-source-shortcut').disabled=busy||!writable();
   $('write-target').classList.toggle('unlinked',!linked());
@@ -309,7 +310,7 @@ $('import-form').onsubmit=async event=>{
 };
 async function changeMonth(month){
   const code=project?.code,key=selectedSheet?.key;
-  if(await exclusive(async()=>{const result=await api('/api/month',{month});selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();})){await selectProject(catalog.some(item=>item.code===code)?code:catalog[0]?.code,key);message('已切换至 '+catalogInfo.active_month,true);}
+  if(await exclusive(async()=>{const result=await api('/api/month',{month});selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();})){await selectProject(catalog.some(item=>item.code===code)?code:catalog[0]?.code,key);}
   else $('month-select').value=catalogInfo.active_month;
 }
 $('month-select').onchange=()=>changeMonth($('month-select').value);
