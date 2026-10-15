@@ -6,22 +6,27 @@ function element(id){if(!elements.has(id))elements.set(id,{value:'',setAttribute
 const project={workbook_path:'C:\\Labwork\\months\\2026-10\\LAB.xlsx',code:'LAB',name:'自定义项目',sheets:[{key:'s0',name:'原始表'},{key:'s1',name:'水分',method_key:'water'}],methods:[{key:'water',name:'水分',sheet:'水分',fields:[],params:{},columns:{}},{key:'water_diluted',name:'稀释水分',sheet:'水分',fields:[],params:{},columns:{}}],rules_confirmed:false};
 const projects=[project],view={name:'原始表',columns:[{label:'A',width:80}],rows:Array.from({length:40},(_,index)=>({number:index+1,height:24,cells:[{ref:'A'+(index+1),value:index===19?'中间历史记录':String(index+1),raw:String(index+1),style:0}]})),merges:[],styles:[{}],sheet_names:[],last_row:40};
 let active='2026-10',writable=true,missingOnce=false,redirect,retryDone=false,allowConfirm=true,monthPreviewFails=false,monthTargetConflict=false,monthConfirmFails=false,sourceFolder='';
+let editPreviewGate=null,editPreviewFails=false,editCommitFails=false,sheetRefreshFails=false,browserTruncated=false;
 const confirmations=[],blankView={...view,name:'水分',columns:[{label:'A',width:80},{label:'B',width:120}],rows:[{number:1,height:24,cells:[{ref:'A1',value:'检测日期',raw:'检测日期',style:0},{ref:'B1',value:'计算结果',raw:'计算结果',style:0}]},{number:4,height:24,cells:[{ref:'A4',value:'',raw:'',style:0},{ref:'B4',value:'',raw:'',formula:'A4*2',style:0}]}],start_row:1,next_row:101,styles:[{color:'rgb(255,0,0)'}]};
 const context=vm.createContext({
   console,Date,confirm(message){confirmations.push(message);return allowConfirm;},LabGrid:require('./grid.js'),sessionStorage:{getItem(){return '2026-10';},setItem(){},removeItem(){}},
   document:{getElementById:element,querySelector(){return{content:'test-token'};},querySelectorAll(){return[];},addEventListener(){}},
   location:{assign(path){redirect=path;}},
   fetch:async(path,options)=>{requests.push({path,...options});let data;
+    if(sheetRefreshFails&&path.startsWith('/api/sheet/')){sheetRefreshFails=false;return{ok:false,status:400,json:async()=>({error:'刷新测试失败'})};}
     if(path==='/api/catalog'&&missingOnce){missingOnce=false;return{ok:false,status:400,json:async()=>({error:'月份不存在，请刷新目录'})};}
     if(path==='/api/catalog')data={projects,active_month:active,months:['2026-09','2026-10'],current_month:'2026-10',writable,monthly_rules:{},source_folder:sourceFolder,version:'test',port:18807};
-    else if(path==='/api/history')data=[{id:'pending-id',state:retryDone?'done':'writing',request:{project:'LAB',method:'manual',entries:[{batch:'B1'}]},outputs:[{display:'已校验录入',unit:''}],rows:[7]},{id:'format-history',state:'done',request:{operation:'format',project:'LAB',method:'__format__',sheet:'原始表',range:'C3:E3',entries:[]},outputs:[],rows:[]}];
+    else if(path==='/api/history')data=[{id:'pending-id',state:retryDone?'done':'writing',request:{project:'LAB',method:'manual',entries:[{batch:'B1'}]},outputs:[{display:'已校验录入',unit:''}],rows:[7]},{id:'format-history',state:'done',request:{operation:'format',project:'LAB',method:'__format__',sheet:'原始表',range:'C3:E3',entries:[]},outputs:[],rows:[]},{id:'cell-history',state:'done',request:{operation:'edit',project:'LAB',method:'__edit__',sheet:'原始表',changes:[{ref:'A20',value:'修正'},{ref:'A21',value:'2.5'}],entries:[]},outputs:[],rows:[20,21]}];
     else if(path==='/api/commit/pending-id'){retryDone=true;data={message:'已完成恢复',sheet:'原始表',workbook_path:'C:/data/LAB.xlsx',rows:[7],download:'/api/book/download',source_sync:{state:'unlinked'}};}
     else if(path==='/api/commit/format-pending')data={message:'已恢复格式',sheet:'原始表',rows:[],source_sync:{state:'synced',path:'C:/source/LAB.xlsx'}};
     else if(path.endsWith('/source')){const target=JSON.parse(options.body).path;project.source_link=target?{path:target,hash:'source-hash'}:null;data={ok:true};}
-    else if(path==='/api/source-folder/scan'){const body=JSON.parse(options.body);data={root:body.path,fingerprint:'folder-fingerprint',entries:[{project:'NEW',name:'新关联项目',month:active,path:'C:/source/NEW/2026/2026.10/NEW.xlsx',state:projects.some(item=>item.code==='NEW')?'linked':'import'}],issues:[],can_bind:true,latest_month:active};}
-    else if(path==='/api/source-folder/bind'){const body=JSON.parse(options.body);assert.equal(body.fingerprint,'folder-fingerprint');sourceFolder=body.path;const exists=projects.some(item=>item.code==='NEW');if(!exists)projects.push({...project,code:'NEW',name:'新关联项目',source_link:{path:'C:/source/NEW/2026/2026.10/NEW.xlsx',hash:'imported-source-hash'}});data={month:active,imported:exists?0:1,linked:0,skipped:exists?1:0,source_folder:sourceFolder};}
+    else if(path.startsWith('/api/source-folder/browse')){const location=path.includes('?')?decodeURIComponent(path.split('?path=')[1]):null;data={path:location,parent:location==='C:/source'?'C:/':null,roots:!location,truncated:browserTruncated,directories:location?[{name:'NEW',path:'C:/source/NEW',selectable:true}]:[{name:'C:',path:'C:/',selectable:true}]};}
+    else if(path==='/api/source-folder/scan'){const body=JSON.parse(options.body);data={root:body.path,fingerprint:'folder-fingerprint',entries:[{id:'new-id',selectable:true,selected:true,project:'NEW',name:'新关联项目',month:active,path:'C:/source/NEW/2026/2026.10/NEW.xlsx',state:projects.some(item=>item.code==='NEW')?'linked':'import'},{id:'ignored-id',selectable:false,selected:false,path:'C:/source/unrecognized.xlsx',name:'未识别文件',state:'unrecognized'}],issues:[],can_bind:true,latest_month:active};}
+    else if(path==='/api/source-folder/bind'){const body=JSON.parse(options.body);assert.equal(body.fingerprint,'folder-fingerprint');assert.deepEqual(body.selected,['new-id']);sourceFolder=body.path;const exists=projects.some(item=>item.code==='NEW');if(!exists)projects.push({...project,code:'NEW',name:'新关联项目',source_link:{path:'C:/source/NEW/2026/2026.10/NEW.xlsx',hash:'imported-source-hash'}});data={month:active,imported:exists?0:1,linked:0,skipped:exists?1:0,source_folder:sourceFolder};}
     else if(path.endsWith('/remove')){const code=path.split('/')[3];projects.splice(projects.findIndex(item=>item.code===code),1);data={ok:true};}
-    else if(path==='/api/preview'){const body=JSON.parse(options.body);data={id:'preview-id',view,entries:body.entries,rows:[7],outputs:[{display:'1.234',unit:'%'}],download:'/api/preview-download'};}
+    else if(path.endsWith('/edit-preview')){if(editPreviewGate)await editPreviewGate;if(editPreviewFails){editPreviewFails=false;return{ok:false,status:409,json:async()=>({error:'编辑预览测试失败'})};}const body=JSON.parse(options.body);data={id:'edit-id',fingerprint:'test-fingerprint',view:{...view,rows:view.rows.map(row=>({...row,cells:row.cells.map(cell=>{const change=body.changes.find(item=>item.ref===cell.ref);return change?{...cell,raw:change.value,value:change.value}:cell;})}))},download:'/api/edit-download',changes:body.changes,warnings:[]};}
+    else if(path==='/api/commit/edit-id'){if(editCommitFails){editCommitFails=false;return{ok:false,status:409,json:async()=>({error:'写入测试失败'})};}data={message:'单元格已写入',sheet:'原始表',rows:[],source_sync:{state:'synced',path:project.source_link?.path}};}
+    else if(path==='/api/preview'){const body=JSON.parse(options.body);data={id:'preview-id',fingerprint:'test-fingerprint',view,entries:body.entries,rows:[7],outputs:[{display:'1.234',unit:'%'}],download:'/api/preview-download'};}
     else if(path==='/api/commit/preview-id')data={message:'已写入原文件',workbook_path:project.workbook_path,sheet:'原始表',rows:[7],source_sync:{state:'synced',path:project.source_link?.path}};
     else if(path==='/api/month/preview'){
       if(monthPreviewFails){monthPreviewFails=false;return{ok:false,status:409,json:async()=>({error:'工作簿暂时不可用'})};}
@@ -116,6 +121,45 @@ function assertRenderedRows(stage){
   assert.equal(vm.runInContext('rows[0].appearance',context),'无色');
   await element('calculate').onclick();assert.equal(element('commit').disabled,false);
   await element('commit').onclick();assert(element('write-receipt-text').textContent.includes('已写入原文件：C:/source/LAB.xlsx'));
+  vm.runInContext("stageCell('A20','修正历史记录')",context);
+  assert.equal(element('cell-preview').disabled,false);assert.equal(element('commit').disabled,true);assert.equal(vm.runInContext('previewId',context),null);
+  allowConfirm=false;await vm.runInContext("selectProject('LAB','s1')",context);assert.equal(vm.runInContext('selectedSheet.key',context),'s0','switch canceled preserves edit');allowConfirm=true;
+  await element('cell-preview').onclick();
+  assert.equal(requests.at(-1).path,'/api/workbook/LAB/edit-preview');
+  const editedRequest=JSON.parse(requests.at(-1).body);assert.equal(editedRequest.fingerprint,'test-fingerprint');assert.deepEqual(editedRequest.changes,[{ref:'A20',value:'修正历史记录'}]);
+  assert.equal(vm.runInContext('previewId',context),'edit-id');assert.equal(element('cell-commit').disabled,false);
+  assert(element('sheet').innerHTML.includes('修正历史记录'));
+  vm.runInContext("stageCell('A20','二次修正')",context);assert.equal(element('cell-commit').disabled,true);
+  await element('cell-preview').onclick();assert.equal(JSON.parse(requests.at(-1).body).preview_id,'edit-id','editing an existing candidate uses candidate origin');
+  await element('cell-commit').onclick();assert.equal(vm.runInContext('previewId',context),null);assert(element('write-receipt-text').textContent.includes('已写入原文件'));
+  vm.runInContext("rows[0].appearance='组合计算结果'",context);await element('calculate').onclick();
+  vm.runInContext("previewId='old-candidate';stageCell('A20','临时修改');stageCell('A20','20')",context);
+  assert.equal(vm.runInContext('previewId',context),'old-candidate','reverting all cell drafts restores the displayed candidate');
+  assert.equal(vm.runInContext('cellDraftBaseId',context),null);assert.equal(element('cell-commit').disabled,false);
+  vm.runInContext("invalidate()",context);await element('calculate').onclick();
+  vm.runInContext("previewId='current-candidate';stageCell('A20','本次修正')",context);
+  await element('cell-preview').onclick();assert.equal(JSON.parse(requests.at(-1).body).preview_id,'current-candidate','new edits never reuse an older reverted candidate');
+  editCommitFails=true;await element('cell-commit').onclick();assert.equal(vm.runInContext('previewId',context),'edit-id','failed commit keeps its candidate for retry');
+  assert.equal(vm.runInContext('rows[0].appearance',context),'组合计算结果','failed commit preserves measurement inputs');
+  sheetRefreshFails=true;await element('cell-commit').onclick();
+  assert.equal(vm.runInContext('rows[0].appearance',context),undefined,'committed calculation entries clear even if the following sheet refresh fails');
+  assert.equal(vm.runInContext('previewId',context),null);assert(element('message').textContent.includes('已写入原文件，但页面刷新失败'));
+  await vm.runInContext("selectSheet('s0',1,'manual')",context);vm.runInContext("stageCell('A20','请求前修改')",context);
+  let releasePreview;editPreviewGate=new Promise(resolve=>{releasePreview=resolve;});editPreviewFails=true;
+  const pendingEdit=element('cell-preview').onclick();
+  assert.equal(vm.runInContext('busy',context),true);
+  vm.runInContext("stageCell('A21','请求中修改');pasteCells('A22','请求中粘贴')",context);
+  assert.equal(vm.runInContext('cellDraft.size',context),1,'request-time cell input cannot replace the submitted draft');
+  assert.equal(vm.runInContext('discardCellChanges(false)',context),false,'request-time navigation cannot discard the submitted draft');
+  await vm.runInContext("changeMonth('2026-09')",context);assert.equal(vm.runInContext('selectedMonth',context),'2099-11','request-time month switch is blocked');
+  releasePreview();await pendingEdit;editPreviewGate=null;
+  assert.equal(vm.runInContext("cellDraft.get('A20')",context),'请求前修改','failed preview retains the dirty draft');
+  assert.equal(element('cell-preview').disabled,false);assert.equal(element('cell-commit').disabled,true);
+  await element('cell-preview').onclick();element('cell-discard').onclick();
+  assert.equal(vm.runInContext('previewId',context),null);assert.equal(element('commit').disabled,true);assert.equal(element('download').hidden,true,'discarded candidate is no longer offered for download');
+  browserTruncated=true;await vm.runInContext("browseSourceFolder('C:/source')",context);assert(element('folder-browser-status').textContent.includes('部分目录'));assert(element('folder-browser-status').textContent.includes('500'));browserTruncated=false;
+  vm.runInContext("displayedView={...displayedView,rows:[{number:1,cells:[{ref:'A1',raw:'1',formula:'A2*2',readonly:true}]}]}",context);
+  assert.throws(()=>vm.runInContext("stageCell('A1','bad')",context),/只读/);await vm.runInContext("selectSheet('s0',1,'manual')",context);
   element('format-range').value='c3:e3';element('format-bold').value='false';
   let format=vm.runInContext('formatRequest()',context);
   assert.equal(format.range,'C3:E3');assert.equal(format.bold,false);assert.equal(format.fingerprint,'test-fingerprint');assert(!Object.hasOwn(format,'fill_color'));assert(!Object.hasOwn(format,'number_format'));
@@ -142,28 +186,49 @@ function assertRenderedRows(stage){
   await vm.runInContext('setSource(null)',context);assert.equal(project.source_link,null);assert.equal(element('source-unlink').disabled,true);
   assert.equal(element('commit').disabled,true);assert.equal(element('format-save').disabled,true);
   const beforeFolderScan=projects.length;
-  element('source-folder-path').value='C:/source';element('source-folder-path').listeners.input();
+  await element('source-folder-choose').onclick();assert.equal(element('folder-browser').open,true);assert(requests.at(-1).path==='/api/source-folder/browse');
+  await vm.runInContext("browseSourceFolder('C:/source')",context);element('folder-browser-confirm').onclick();
+  assert.equal(element('folder-browser').open,false);assert.equal(element('source-folder-path').value,'C:/source');
   assert.equal(element('source-folder-scan').disabled,false);assert.equal(element('source-folder-bind').disabled,true);
   await element('source-folder-form').onsubmit({preventDefault(){}});
   assert.equal(projects.length,beforeFolderScan,'scanning does not import or bind projects');
   assert(element('source-folder-results').innerHTML.includes('C:/source/NEW/2026/2026.10/NEW.xlsx'));assert.equal(element('source-folder-bind').disabled,false);
-  element('source-folder-path').value='C:/other';element('source-folder-path').listeners.input();
-  const beforeInvalidBind=requests.length;await element('source-folder-bind').onclick();assert.equal(requests.length,beforeInvalidBind,'editing root invalidates scan');
-  element('source-folder-path').value='C:/source';await element('source-folder-form').onsubmit({preventDefault(){}});await element('source-folder-bind').onclick();
+  assert(element('source-folder-results').innerHTML.includes('ignored-id'));assert(element('source-folder-results').innerHTML.includes('disabled'));
+  element('source-folder-search').value='unrecognized';element('source-folder-search').listeners.input();
+  assert(!element('source-folder-results').innerHTML.includes('new-id'));assert.equal(vm.runInContext('sourceFolderSelected.has("new-id")',context),true,'filter retains selected hidden rows');
+  element('source-folder-clear').onclick();assert.equal(element('source-folder-bind').disabled,true);
+  element('source-folder-select').onclick();assert.equal(vm.runInContext('sourceFolderSelected.has("ignored-id")',context),false);
+  vm.runInContext("chooseSourceFolder('C:/other')",context);
+  const beforeInvalidBind=requests.length;await element('source-folder-bind').onclick();assert.equal(requests.length,beforeInvalidBind,'changing selected root invalidates scan');
+  vm.runInContext("chooseSourceFolder('C:/source')",context);await element('source-folder-form').onsubmit({preventDefault(){}});await element('source-folder-bind').onclick();
   assert.equal(projects.length,beforeFolderScan+1);assert.equal(sourceFolder,'C:/source');
   await vm.runInContext("selectProject('NEW')",context);assert.equal(element('write-target-path').textContent,'C:/source/NEW/2026/2026.10/NEW.xlsx');
   await element('source-folder-form').onsubmit({preventDefault(){}});await element('source-folder-bind').onclick();
   assert.equal(projects.length,beforeFolderScan+1,'repeated folder association is idempotent');
   assert(!fs.readFileSync(__dirname+'/index.html','utf8').includes('id="source-import-form"'),'folder association replaces per-file new-project entry');
+  assert(fs.readFileSync(__dirname+'/index.html','utf8').includes('id="source-folder-path" readonly'),'server path is selected, not manually typed');
   await vm.runInContext("selectProject('LAB','s0')",context);vm.runInContext("rows[0].batch='UNSAVED'",context);
   await vm.runInContext('loadHistory(true)',context);assert(element('history').innerHTML.includes('重试完成写入'));
   assert(element('history').innerHTML.includes('格式设置 · 原始表'));assert(element('history').innerHTML.includes('C3:E3'));assert(!element('history').innerHTML.includes('undefined'));
+  assert(element('history').innerHTML.includes('单元格修改 · 原始表'));assert(element('history').innerHTML.includes('A20 / A21'));assert(!element('history').innerHTML.includes('__edit__'));
   await vm.runInContext("retryWrite('pending-id')",context);assert.equal(retryDone,true);assert(!element('history').innerHTML.includes('重试完成写入'));assert.equal(vm.runInContext('rows[0].batch',context),'UNSAVED');
   assert.equal(requests.filter(request=>request.path==='/api/commit/pending-id').length,1);
-  vm.runInContext("rows[0].batch='ALREADY-WRITTEN';previewId='pending-id'",context);await vm.runInContext("retryWrite('pending-id')",context);
+  vm.runInContext("rows[0].batch='ALREADY-WRITTEN'",context);await element('calculate').onclick();vm.runInContext("previewId='pending-id'",context);await vm.runInContext("retryWrite('pending-id')",context);
   assert.equal(vm.runInContext('rows[0].batch',context),'','recovery of current calculated/manual preview clears committed measurements');
   vm.runInContext("rows[0].batch='STILL-UNSUBMITTED';previewId='format-pending'",context);await vm.runInContext("retryWrite('format-pending')",context);
   assert.equal(vm.runInContext('rows[0].batch',context),'STILL-UNSUBMITTED','format recovery keeps unsubmitted measurements');
+  await vm.runInContext("setSource('C:/source/LAB.xlsx')",context);
+  vm.runInContext("rows[0].appearance='尚未提交的测定';stageCell('A20','仅修改历史单元格')",context);await element('cell-preview').onclick();
+  await vm.runInContext("retryWrite('edit-id')",context);
+  assert.equal(vm.runInContext('rows[0].appearance',context),'尚未提交的测定','current cell-only recovery preserves independent unsubmitted measurements');
+  await element('calculate').onclick();vm.runInContext("stageCell('A20','组合候选的历史修正')",context);await element('cell-preview').onclick();
+  editCommitFails=true;await vm.runInContext("retryWrite('edit-id')",context);
+  assert.equal(vm.runInContext('previewId',context),'edit-id','failed history recovery restores the current candidate');
+  assert.equal(vm.runInContext('previewContainsEntries',context),true,'failed recovery retains its calculation origin for the next retry');
+  assert.equal(vm.runInContext('rows[0].appearance',context),'尚未提交的测定');
+  sheetRefreshFails=true;await vm.runInContext("retryWrite('edit-id')",context);
+  assert.equal(vm.runInContext('rows[0].appearance',context),undefined,'mixed candidate history recovery clears committed measurements before refresh');
+  assert.equal(vm.runInContext('rows[0].batch',context),'');assert.equal(vm.runInContext('previewId',context),null);
   await vm.runInContext("setSource('C:/source/LAB.xlsx')",context);
   assert.equal(element('source-unlink').hidden,false);
   allowConfirm=false;let requestCount=requests.length;await element('source-unlink').onclick();assert.equal(requests.length,requestCount,'cancel unlink sends nothing');

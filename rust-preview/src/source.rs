@@ -159,6 +159,16 @@ fn fallback_path(path:&Path,newmonth:&str,code:&str,name:&str)->Result<PathBuf,E
     let filename=if let Some((_,token,period))=filename_period(stem){let replacement=if token.len()==6{newmonth.replace('-',"")}else if token.contains('.') {newmonth.replace('-',".")}else{newmonth.into()};filename.replace(&token,&replacement).replace(&period,newmonth)}else{filename.into()};
     Ok(project.join(&newmonth[..4]).join(newmonth.replace('-',".")).join(filename))
 }
+fn inherited_month_path(path:&Path,previous:&str,newmonth:&str,code:&str,name:&str)->Result<PathBuf,Error>{
+    if !months::valid(previous)||!months::valid(newmonth){return Err(error("月份无效"));}
+    let filename=path.file_name().and_then(|s|s.to_str()).ok_or_else(||error("原表文件名无效"))?;
+    let destination=if let Ok(path)=next_path(path,previous,newmonth){path}else{
+        let candidates=path.parent().into_iter().flat_map(Path::ancestors).filter(|directory|directory.file_name().and_then(|s|s.to_str()).is_some_and(|component|component.eq_ignore_ascii_case(name)||component.eq_ignore_ascii_case(code))).collect::<Vec<_>>();
+        if candidates.len()>1{return Err(conflict("原表路径包含多个同名项目目录，无法唯一确定新月位置，请核对原文件关联"));}
+        if let Some(project)=candidates.first(){project.join(&newmonth[..4]).join(newmonth.replace('-',".")).join(filename)}else{fallback_path(path,newmonth,code,name)?}
+    };
+    Ok(destination.with_file_name(folder::next_filename(filename,newmonth)?))
+}
 pub fn plan_month(app:&App,previous:&str,newmonth:&str,generated:&[(std::ffi::OsString,Vec<u8>)],bindings:&BTreeMap<String,Binding>)->Result<(Vec<NewSource>,Vec<String>),Error>{
     let mut plans=Vec::new();let mut issues=Vec::new();let names=months::names(&app.home)?;
     for (filename,data) in generated {
@@ -166,7 +176,7 @@ pub fn plan_month(app:&App,previous:&str,newmonth:&str,generated:&[(std::ffi::Os
         let Some(binding)=bindings.get(code) else{continue;};
         let source=local_path(&binding.path)?;external(app,&source)?;
         if hash(&fs::read(&source).map_err(error)?)!=binding.hash{return Err(conflict(format!("{code}原表在预览期间发生变化，请重新预览")));}
-        let path=match next_path(&source,previous,newmonth){Ok(path)=>path,Err(_)=>fallback_path(&source,newmonth,code,names.get(code).map(String::as_str).unwrap_or(code))?};
+        let path=inherited_month_path(&source,previous,newmonth,code,names.get(code).map(String::as_str).unwrap_or(code))?;
         if path.exists(){issues.push(format!("新月原表已存在，不会覆盖：{}",display_path(&path)));}
         let mut existing=path.parent().unwrap();while !existing.exists(){existing=existing.parent().ok_or_else(||error("目标目录无效"))?;}
         if !existing.is_dir(){issues.push(format!("新月目标的上级路径不是文件夹：{}",display_path(existing)));}
@@ -212,5 +222,28 @@ mod tests {
         assert_eq!(fallback_path(Path::new("flat/EF-2025.01.xlsx"),"2027-01","EF","bad/name").unwrap(),PathBuf::from("flat/EF/2027/2027.01/EF-2027.01.xlsx"));
         assert_eq!(fallback_path(Path::new("flat/固定.xlsx"),"2027-01","EF","..\\escape").unwrap(),PathBuf::from("flat/固定/2027/2027.01/固定.xlsx"));
         assert!(!safe_component("CON")&&!safe_component("bad:name")&&!safe_component(".."));
+        for (old,new) in [("all/分类/EF-理化/2026.7/EF-理化-2026年7月.xlsx","all/分类/EF-理化/2027/2027.01/EF-理化-2027年1月.xlsx"),("all/EF-理化/归档/2026年7月/原表.xlsx","all/EF-理化/2027/2027.01/原表.xlsx"),("all/EF-理化/归档/2026.7/EF-理化-202607.xlsx","all/EF-理化/2027/2027.01/EF-理化-202701.xlsx"),("all/EF/2026年7月/原表.xlsx","all/EF/2027/2027.01/原表.xlsx")]{assert_eq!(inherited_month_path(Path::new(old),"2026-07","2027-01","EF","EF-理化").unwrap(),PathBuf::from(new));}
+        assert_eq!(inherited_month_path(Path::new("flat/EF-理化-2026年7月.xlsx"),"2026-07","2027-01","EF","EF-理化").unwrap(),PathBuf::from("flat/EF-理化/2027/2027.01/EF-理化-2027年1月.xlsx"));
+        assert!(inherited_month_path(Path::new("all/EF/EF-理化/2026.7/原表.xlsx"),"2026-07","2027-01","EF","EF-理化").is_err());
+    }
+    #[test]
+    fn saved_folder_changes_do_not_move_other_projects_months(){
+        let temporary=std::env::temp_dir().join(format!("labwork-month-roots-{}",random_id()));fs::create_dir(&temporary).unwrap();
+        let result=(||{
+            let home=temporary.join("data");fs::create_dir(&home).unwrap();
+            let old_root=temporary.join("全部旧项目");let project=old_root.join("EF-理化");let source=project.join("归档/2026年7月/原表.xlsx");fs::create_dir_all(source.parent().unwrap()).unwrap();fs::write(&source,b"isolated original").unwrap();
+            let new_root=temporary.join("另一次勾选/OTHER");fs::create_dir_all(&new_root).unwrap();
+            fs::write(home.join("project-names.json"),serde_json::to_vec(&BTreeMap::from([("EF","EF-理化")])).unwrap()).unwrap();
+            let db=Connection::open_in_memory().unwrap();initialize(&db).unwrap();folder::initialize(&db).unwrap();
+            let app=App{home,db,projects:vec![],token:String::new(),port:19000,lan_ip:String::new(),access:auth::Access::new(None)};
+            let binding=Binding{path:display_path(&fs::canonicalize(&source).unwrap()),hash:hash(b"isolated original")};let bindings=BTreeMap::from([("EF".into(),binding)]);let generated=vec![(std::ffi::OsString::from("EF.xlsx"),b"new template".to_vec())];
+            app.db.execute("INSERT INTO source_folder_settings(id,path)VALUES(1,?1)",[display_path(&old_root)]).unwrap();
+            let first=plan_month(&app,"2026-07","2027-01",&generated,&bindings)?.0;
+            app.db.execute("UPDATE source_folder_settings SET path=?1 WHERE id=1",[display_path(&new_root)]).unwrap();
+            let second=plan_month(&app,"2026-07","2027-01",&generated,&bindings)?.0;
+            let expected=fs::canonicalize(&project).unwrap().join("2027/2027.01/原表.xlsx");
+            assert_eq!(first[0].path,expected);assert_eq!(second[0].path,expected);assert_eq!(fs::read(source).unwrap(),b"isolated original");Ok::<_,Error>(())
+        })();
+        fs::remove_dir_all(temporary).unwrap();result.unwrap();
     }
 }

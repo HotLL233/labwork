@@ -4,6 +4,8 @@ let catalog=[],catalogInfo={},selectedSheet=null,project,method,baseView,nextRow
 let sheetRequestId=0,rawNext=null,workbookFingerprint=null;
 let monthPreview=null,monthPreviewRequest=0,monthPreviewBusy=false,monthPreviewBlocked=false,monthAdjustments=[],monthSelection=null,monthAnchor=null,monthDrag=false,monthDragged=false,monthFocus={};
 let sourceFolderPreview=null;
+let sourceFolderSelected=new Set(),folderBrowser=null,folderBrowserBusy=false;
+let displayedView=null,cellDraft=new Map(),cellDraftBaseId=null,cellSelection=null,cellEditor=null,previewKind='calculation',previewContainsEntries=false;
 let selectedMonth=sessionStorage.getItem('labwork-month')||'';
 const token=document.querySelector('meta[name="labwork-token"]').content;
 const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -16,16 +18,16 @@ const emptyRow=()=>({date:LabGrid.labels(rows).at(-1)?.date||today(),batch:LabGr
 async function responseData(response){if(response.status===401){location.assign('/login');throw Error('请登录后继续');}const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data;}
 async function api(path,body){const response=await fetch(path,{headers:{...(selectedMonth?{'X-Labwork-Month':selectedMonth}:{}),...(body?{'Content-Type':'application/json','X-Labwork-Token':token}:{})},method:body?'POST':'GET',body:body?JSON.stringify(body):undefined});return responseData(response);}
 function showWorkspace(view){if(busy)return;$('entry-view').hidden=view!=='entry';$('management-view').hidden=view!=='manage';for(const [id,value] of [['nav-entry','entry'],['nav-manage','manage']]){$(id).classList.toggle('active',view===value);$(id).setAttribute('aria-pressed',String(view===value));}}
-$('nav-entry').onclick=()=>showWorkspace('entry');$('nav-manage').onclick=()=>showWorkspace('manage');$('manage-shortcut').onclick=()=>{showWorkspace('manage');$('source-folder-path').focus();};
+$('nav-entry').onclick=()=>showWorkspace('entry');$('nav-manage').onclick=()=>showWorkspace('manage');$('manage-shortcut').onclick=()=>{showWorkspace('manage');$('source-folder-choose').focus();};
 $('link-source-shortcut').onclick=()=>{showWorkspace('manage');$('source-panel').scrollIntoView({behavior:'smooth',block:'start'});$('source-path').focus();};
 $('project-select').onchange=()=>selectProject($('project-select').value);$('sheet-select').onchange=()=>selectSheet($('sheet-select').value);
-$('logout').onclick=async()=>{if(busy)return;try{await api('/api/logout',{});location.assign('/login');}catch(e){message(e.message);}};
+$('logout').onclick=async()=>{if(busy||!discardCellChanges())return;try{await api('/api/logout',{});location.assign('/login');}catch(e){message(e.message);}};
 const previewLabel=()=>method?.kind==='manual'?'预览写入':'计算并预览';
 function message(text,success=false){$('message').hidden=false;$('message').textContent=text;$('message').className=success?'success':'';}
-function invalidate(){const hadPreview=previewId;previewId=null;inputVersion++;$('commit').disabled=true;$('download').hidden=true;$('results').hidden=true;$('sheet-status').textContent='输入已更改，请重新预览';$('action-state').textContent=linked()?'录入后生成预览':'请先关联原文件，才能确认写入';if(hadPreview&&baseView)sheet(baseView,true);}
+function invalidate(){const hadPreview=previewId;previewId=null;previewContainsEntries=false;cellDraftBaseId=null;inputVersion++;$('commit').disabled=true;$('download').hidden=true;$('results').hidden=true;$('sheet-status').textContent='输入已更改，请重新预览';$('action-state').textContent=linked()?'录入后生成预览':'请先关联原文件，才能确认写入';if(hadPreview&&baseView&&!cellDraft.size)sheet(baseView,true);updateCellState();}
 function remember(){undo.push(rows.map(r=>({...r})));if(undo.length>30)undo.shift();}
 function refresh(){entry();if(baseView)sheet(baseView,true);markSelection();}
-function changed(next){remember();rows=next;invalidate();refresh();}
+function changed(next){if(!discardCellChanges())return;remember();rows=next;invalidate();refresh();}
 function input(i,key){const numeric=method.fields.some(f=>f.key===key&&f.input_type!=='text');return `<input data-index="${i}" data-key="${key}" aria-label="第${i+1}行 ${escape(fields().find(f=>f.key===key).label)}" ${numeric?'inputmode="decimal"':''} ${key==='date'?'placeholder="YYYY-MM-DD"':key==='batch'?'maxlength="100"':key==='notes'?'maxlength="2000"':''} autocomplete="off" value="${escape(rows[i][key]||'')}">`;}
 function entry(){
   $('entry').innerHTML=`<table><thead><tr><th>测定行</th>${fields().map(f=>`<th>${escape(f.label)}${f.unit?`<small>（${escape(f.unit)}）</small>`:''}</th>`).join('')}</tr></thead><tbody>${rows.map((r,i)=>`<tr><td>${i+1}</td>${keys().map(k=>`<td data-index="${i}" data-key="${k}">${input(i,k)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
@@ -53,12 +55,12 @@ function bindInputs(){document.querySelectorAll('input[data-key]').forEach(el=>{
   if(el.dataset.bound)return;el.dataset.bound='1';
   el.addEventListener('pointerdown',e=>select(+el.dataset.index,el.dataset.key,e.shiftKey));
   el.addEventListener('focus',()=>{if(!selection||+el.dataset.index<selection.r0||+el.dataset.index>selection.r1||keys().indexOf(el.dataset.key)<selection.c0||keys().indexOf(el.dataset.key)>selection.c1)select(+el.dataset.index,el.dataset.key);$('cell-address').textContent=`录入 ${+el.dataset.index+1} / ${fields().find(f=>f.key===el.dataset.key).label}`;$('formula-value').value=el.value;});
-  el.addEventListener('input',()=>{if(writing){el.value=rows[+el.dataset.index][el.dataset.key]||'';return;}rows[+el.dataset.index][el.dataset.key]=el.value;document.querySelectorAll(`input[data-index="${el.dataset.index}"][data-key="${el.dataset.key}"]`).forEach(other=>{if(other!==el)other.value=el.value;});const fromSheet=!!el.closest('#sheet'),i=el.dataset.index,key=el.dataset.key,position=el.selectionStart;invalidate();if(fromSheet){const replacement=$('sheet').querySelector(`input[data-index="${i}"][data-key="${key}"]`);if(replacement&&replacement!==el){replacement.focus();replacement.setSelectionRange(position,position);}}});
+  el.addEventListener('input',()=>{if(busy||writing||!discardCellChanges()){el.value=rows[+el.dataset.index][el.dataset.key]||'';return;}rows[+el.dataset.index][el.dataset.key]=el.value;document.querySelectorAll(`input[data-index="${el.dataset.index}"][data-key="${el.dataset.key}"]`).forEach(other=>{if(other!==el)other.value=el.value;});const fromSheet=!!el.closest('#sheet'),i=el.dataset.index,key=el.dataset.key,position=el.selectionStart;invalidate();if(fromSheet){const replacement=$('sheet').querySelector(`input[data-index="${i}"][data-key="${key}"]`);if(replacement&&replacement!==el){replacement.focus();replacement.setSelectionRange(position,position);}}});
   el.addEventListener('keydown',e=>{
-    if(writing)return;
+    if(busy||writing)return;
     const k=keys(),r=+el.dataset.index,c=k.indexOf(el.dataset.key),container=el.closest('#entry,#mobile-entry,#sheet');let nr=r,nc=c;
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='d'){e.preventDefault();if(selection&&selection.r1>selection.r0){const end=selection.r1;selection={...selection,r1:selection.r0};fill(end,'copy');}return;}
-    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&undo.length){e.preventDefault();rows=undo.pop();selection=null;anchor=null;invalidate();refresh();return;}
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&undo.length){e.preventDefault();if(!discardCellChanges())return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();return;}
     if(e.key==='Enter')nr+=e.shiftKey?-1:1;
     else if(e.key==='ArrowUp')nr--;
     else if(e.key==='ArrowDown')nr++;
@@ -69,11 +71,86 @@ function bindInputs(){document.querySelectorAll('input[data-key]').forEach(el=>{
     const target=container.querySelector(`input[data-index="${nr}"][data-key="${k[nc]}"]`);
     if(target){e.preventDefault();select(nr,k[nc],e.shiftKey&&e.key.startsWith('Arrow'));target.focus();target.select();}
   });
-  el.addEventListener('paste',e=>{if(writing){e.preventDefault();return;}const text=e.clipboardData.getData('text/plain');if(!text.includes('\t')&&!text.includes('\n'))return;e.preventDefault();try{changed(LabGrid.paste(rows,keys(),+el.dataset.index,keys().indexOf(el.dataset.key),text,emptyRow));}catch(err){message(err.message);}});
+  el.addEventListener('paste',e=>{if(busy||writing){e.preventDefault();return;}const text=e.clipboardData.getData('text/plain');if(!text.includes('\t')&&!text.includes('\n'))return;e.preventDefault();try{changed(LabGrid.paste(rows,keys(),+el.dataset.index,keys().indexOf(el.dataset.key),text,emptyRow));}catch(err){message(err.message);}});
   el.addEventListener('copy',e=>{if(!selection||(selection.r0===selection.r1&&selection.c0===selection.c1))return;e.preventDefault();e.clipboardData.setData('text/plain',rows.slice(selection.r0,selection.r1+1).map(r=>keys().slice(selection.c0,selection.c1+1).map(k=>r[k]||'').join('\t')).join('\n'));});
 });}
+function editableCell(cell){return !!cell&&writable()&&linked()&&!!workbookFingerprint&&!cell.readonly&&!cell.formula;}
+function updateCellState(){
+  $('cell-preview').disabled=busy||!writable()||!linked()||!cellDraft.size;
+  $('cell-commit').disabled=busy||!writable()||!linked()||!previewId||cellDraft.size>0;
+  $('commit').disabled=$('cell-commit').disabled;
+  $('cell-discard').hidden=!cellDraft.size&&!(previewKind==='cells'&&previewId);$('cell-discard').disabled=busy;
+  if(cellDraft.size)$('cell-edit-status').textContent=`已修改 ${cellDraft.size} 格，尚未写入；请先预览修改。`;
+  else if(!writable())$('cell-edit-status').textContent='历史月份只读。';
+  else if(!linked())$('cell-edit-status').textContent='关联原文件后，可双击单元格编辑；手机点击编辑。';
+  else $('cell-edit-status').textContent=previewId?'预览已就绪，确认后写入原文件。':'双击单元格或选中后按 Enter 编辑；手机点击编辑。公式只读。';
+}
+function discardCellChanges(ask=true){
+  if(busy)return false;finishCellEditor();
+  if(!cellDraft.size&&!(previewKind==='cells'&&previewId))return true;
+  if(ask&&!confirm('单元格修改尚未确认写入。放弃这些修改并继续？'))return false;
+  cellDraft.clear();cellDraftBaseId=null;previewId=null;previewKind='calculation';previewContainsEntries=false;cellSelection=null;$('download').hidden=true;$('results').hidden=true;
+  if(baseView)sheet(baseView,!!method&&writable());updateCellState();return true;
+}
+function stageCell(ref,value){
+  if(busy)return;
+  const cell=displayedView?.rows.flatMap(row=>row.cells).find(item=>item.ref===ref);
+  if(!cell||!editableCell(cell))throw Error(cell?.readonly_reason||'此单元格只读，公式和受保护单元格不能修改。');
+  const original=String(cell.edit_value??cell.raw??'');
+  if(String(value)===(cellDraft.get(ref)??original)){const td=$('sheet').querySelector(`td[data-ref="${ref}"]`);if(td)td.textContent=cellDraft.get(ref)??cell.value;return;}
+  if(!cellDraft.size)cellDraftBaseId=previewId;
+  if(String(value)===original)cellDraft.delete(ref);else cellDraft.set(ref,String(value));
+  previewId=cellDraft.size?null:cellDraftBaseId;
+  if(!cellDraft.size)cellDraftBaseId=null;
+  $('download').hidden=!previewId;$('results').hidden=true;
+  const td=$('sheet').querySelector(`td[data-ref="${ref}"]`);if(td){td.textContent=String(value);td.classList.toggle('cell-dirty',cellDraft.has(ref));}
+  $('formula-value').value=String(value);updateCellState();
+}
+function finishCellEditor(cancel=false){
+  if(!cellEditor)return;const {input,ref,before}=cellEditor;cellEditor=null;
+  if(cancel){const td=$('sheet').querySelector(`td[data-ref="${ref}"]`);if(td)td.textContent=before;return;}
+  stageCell(ref,input.value);
+}
+function moveCell(ref,backwards=false,vertical=false){
+  const point=monthPoint(ref),cells=displayedView.rows.flatMap(row=>row.cells).filter(editableCell);
+  const target=vertical?cells.find(cell=>monthPoint(cell.ref).col===point.col&&monthPoint(cell.ref).row===point.row+(backwards?-1:1)):cells[cells.findIndex(cell=>cell.ref===ref)+(backwards?-1:1)];
+  if(target){cellSelection=target.ref;startCellEditor(target.ref);}
+}
+function startCellEditor(ref){
+  if(busy)return;finishCellEditor();
+  const cell=displayedView?.rows.flatMap(row=>row.cells).find(item=>item.ref===ref),td=$('sheet').querySelector(`td[data-ref="${ref}"]`);
+  if(!cell||!td)return;
+  if(!editableCell(cell)){$('cell-edit-status').textContent=cell.readonly_reason||'此单元格只读，公式保留。';return;}
+  const input=document.createElement('input'),before=cellDraft.get(ref)??String(cell.edit_value??cell.raw??'');
+  input.value=before;input.className='sheet-cell-input';input.setAttribute('aria-label',ref+' 单元格内容');input.autocomplete='off';
+  if(cell.value_type==='number')input.inputMode='decimal';
+  cellEditor={input,ref,before};td.textContent='';td.append(input);input.focus();input.select();
+  input.addEventListener('blur',()=>{if(cellEditor?.input===input)finishCellEditor();});
+  input.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();finishCellEditor(true);td.focus();}else if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();finishCellEditor();moveCell(ref,event.shiftKey,event.key==='Enter');}});
+  input.addEventListener('paste',event=>{const value=event.clipboardData.getData('text/plain');if(!/[\t\r\n]/.test(value))return;event.preventDefault();pasteCells(ref,value);});
+}
+function pasteCells(ref,text){
+  if(busy)return;
+  const start=monthPoint(ref),all=new Map(displayedView.rows.flatMap(row=>row.cells).map(cell=>[cell.ref,cell])),updates=[];
+  const lines=text.replace(/\r\n?/g,'\n').replace(/\n$/,'').split('\n');
+  const column=index=>{let result='';for(;index>0;index=Math.floor((index-1)/26))result=String.fromCharCode(65+(index-1)%26)+result;return result;};
+  for(let row=0;row<lines.length;row++)for(const [col,value] of lines[row].split('\t').entries()){const target=column(start.col+col)+(start.row+row),cell=all.get(target);if(!cell||!editableCell(cell)){message(`${target} 无法编辑，整次粘贴未应用。`);return;}updates.push([target,value]);}
+  cellEditor=null;for(const [target,value] of updates)stageCell(target,value);
+}
+$('cell-discard').onclick=()=>discardCellChanges(false);
+globalThis.addEventListener?.('beforeunload',event=>{if(cellDraft.size||previewKind==='cells'&&previewId||cellEditor&&cellEditor.input.value!==cellEditor.before){event.preventDefault();event.returnValue='';}});
+$('cell-preview').onclick=async()=>{
+  finishCellEditor();if(busy||!cellDraft.size||!writable()||!linked())return;
+  const request={sheet:selectedSheet.name,fingerprint:workbookFingerprint,changes:[...cellDraft].map(([ref,value])=>({ref,value})),start:displayedView.start_row||1,...(cellDraftBaseId?{preview_id:cellDraftBaseId}:{})};
+  busy=true;updateCellState();
+  document.querySelectorAll('input[data-key]').forEach(input=>input.readOnly=true);
+  try{const data=await api('/api/workbook/'+encodeURIComponent(project.code)+'/edit-preview',request);previewId=data.id;previewKind='cells';cellDraft.clear();cellDraftBaseId=null;workbookFingerprint=data.fingerprint||workbookFingerprint;sheet(data.view);$('download').href=data.download;$('download').hidden=false;$('sheet-status').textContent='单元格修改预览，尚未写入';message(`已生成 ${request.changes.length} 格修改预览，请核对后确认写入原文件。`+(data.warnings?.length?' '+data.warnings.join('；'):''),true);}
+  catch(error){message(error.message);}
+  finally{busy=false;document.querySelectorAll('input[data-key]').forEach(input=>input.readOnly=false);updateCellState();renderSource();}
+};
 function sheet(view,draft=false,target=$('sheet')){
   const entrySheet=target===$('sheet');
+  if(entrySheet)displayedView=view;
   if(entrySheet)$('sheet-label').textContent=`${project.code} / ${view.name} · 原表布局`;
   const covered=new Set(),merges=new Map();view.merges.forEach(m=>{merges.set(`${m.row}:${m.col}`,m);for(let r=m.row;r<m.row+m.rowspan;r++)for(let c=m.col;c<m.col+m.colspan;c++)if(r!==m.row||c!==m.col)covered.add(`${r}:${c}`);});
   let html=`<colgroup><col style="width:40px">${view.columns.map(c=>`<col style="width:${c.width}px">`).join('')}</colgroup><thead><tr><th class="corner"></th>${view.columns.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead><tbody>`;
@@ -84,10 +161,10 @@ function sheet(view,draft=false,target=$('sheet')){
   if(entrySheet&&draft&&method&&writable()){rows.forEach((row,i)=>{html+=`<tr class="draft-row"><td class="row-num">${nextRow+i}</td>`;view.columns.forEach(col=>{const f=fields().find(f=>method.columns[method.kind==='water_diluted'&&f.key==='result'?'raw_result':f.key]===col.label);html+=f?`<td class="edit-cell" data-index="${i}" data-key="${f.key}">${input(i,f.key)}</td>`:'<td></td>';});html+='</tr>';});}
   target.innerHTML=html+'</tbody>';
   const cellMap=new Map(view.rows.flatMap(r=>r.cells.map(c=>[c.ref,c])));
-  target.querySelectorAll('td[data-ref]').forEach(td=>{const cell=cellMap.get(td.dataset.ref);Object.assign(td.style,view.styles[cell.style]||{});td.addEventListener('click',event=>{if(entrySheet){target.querySelector('.selected')?.classList.remove('selected');td.classList.add('selected');$('cell-address').textContent=cell.ref;$('formula-value').value=cell.formula?'='+cell.formula:cell.raw;if(!busy)$('format-range').value=cell.ref;}else{if(!monthDragged)selectMonthCell(cell.ref,event.shiftKey);monthDragged=false;showMonthCell(cell.ref);}});});
+  target.querySelectorAll('td[data-ref]').forEach(td=>{const cell=cellMap.get(td.dataset.ref);Object.assign(td.style,view.styles[cell.style]||{});if(entrySheet){td.tabIndex=0;td.classList.toggle('cell-readonly',!editableCell(cell));if(cellDraft.has(cell.ref)){td.textContent=cellDraft.get(cell.ref);td.classList.add('cell-dirty');}td.addEventListener('dblclick',()=>startCellEditor(cell.ref));td.addEventListener('keydown',event=>{if(event.target!==td)return;if(event.key==='Enter'){event.preventDefault();startCellEditor(cell.ref);}else if(['Delete','Backspace'].includes(event.key)){event.preventDefault();try{stageCell(cell.ref,'');}catch(error){message(error.message);}}});td.addEventListener('paste',event=>{if(event.target!==td)return;event.preventDefault();pasteCells(cell.ref,event.clipboardData.getData('text/plain'));});}td.addEventListener('click',event=>{if(entrySheet){if(event.target.closest('input'))return;finishCellEditor();target.querySelector('.selected')?.classList.remove('selected');td.classList.add('selected');cellSelection=cell.ref;$('cell-address').textContent=cell.ref;$('formula-value').value=cell.formula?'='+cell.formula:cellDraft.get(cell.ref)??cell.raw;if(!busy)$('format-range').value=cell.ref;if(event.pointerType==='touch'||globalThis.innerWidth<=700)startCellEditor(cell.ref);}else{if(!monthDragged)selectMonthCell(cell.ref,event.shiftKey);monthDragged=false;showMonthCell(cell.ref);}});});
   if(!entrySheet)return;
   $('sheet-tabs').innerHTML=(project.sheets||[]).map(item=>`<button data-sheet="${escape(item.key)}" class="${item.key===selectedSheet?.key?'active':''}">${escape(item.name)}</button>`).join('');$('sheet-tabs').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.sheet));
-  $('sheet-note').textContent=`原表至第 ${view.last_row} 行 · 绿色为本次拟追加 · 同组日期/批号仅首行填写`;bindInputs();markSelection();
+  $('sheet-note').textContent=`原表至第 ${view.last_row} 行 · 绿色为本次预览 · 同组日期/批号仅首行填写`;bindInputs();markSelection();updateCellState();
 }
 function showParameters(){
   const params=method.params||{};
@@ -98,6 +175,7 @@ function showParameters(){
   $('calculation-values').innerHTML=values.map(([key,value])=>{const label=key.startsWith('f:')?`${key.slice(2)} 列公式`:key.startsWith('fixed:')?`固定参数 ${key.slice(6)}`:names[key]||key;return `<dt>${escape(label)}</dt><dd>${escape(value)}</dd>`;}).join('');
 }
 function clearView(){
+  cellDraft.clear();cellDraftBaseId=null;cellSelection=null;cellEditor=null;displayedView=null;previewKind='calculation';previewContainsEntries=false;
   sheetRequestId++;rawNext=null;workbookFingerprint=null;$('format-panel').open=false;$('format-form').reset();$('format-status').textContent='未选择的格式保持原样。';$('sheet-pager').hidden=true;
   method=null;baseView=null;rows=[];undo=[];anchor=null;selection=null;invalidate();
   $('entry').innerHTML='';$('mobile-entry').innerHTML='';$('sheet').innerHTML='';$('parameters').textContent='';$('calculation-details').hidden=true;
@@ -105,6 +183,7 @@ function clearView(){
 }
 async function selectSheet(key,start=1,methodKey,draftRows){
   if(busy||!project)return;
+  if(!discardCellChanges()){ $('sheet-select').value=selectedSheet?.key||'';return; }
   selectedSheet=project.sheets.find(item=>item.key===key);if(!selectedSheet)return;
   clearView();$('message').hidden=true;
   const code=project.code,month=catalogInfo.active_month,requestId=sheetRequestId;
@@ -132,7 +211,7 @@ async function selectSheet(key,start=1,methodKey,draftRows){
   }catch(e){message(e.message);}
 }
 async function selectProject(code,sheetKey,methodKey,draftRows){
-  if(busy)return;project=catalog.find(item=>item.code===code);selectedSheet=null;clearView();
+  if(busy)return;if(!discardCellChanges()){ $('project-select').value=project?.code||'';return; }project=catalog.find(item=>item.code===code);selectedSheet=null;clearView();
   document.querySelectorAll('#projects button').forEach(button=>button.classList.toggle('active',button.dataset.code===code));
   $('project-select').value=project?.code||'';$('project-select').disabled=!catalog.length;$('sheet-select').disabled=!project;
   $('write-target').hidden=!project;$('write-receipt').hidden=true;$('write-target-path').textContent=project?.workbook_path||'尚未获取工作副本路径';
@@ -165,9 +244,10 @@ function renderSource(){
   $('link-source-shortcut').hidden=!project||linked();$('link-source-shortcut').textContent=project?.source_error?'核对关联路径':'关联原文件';
   $('link-source-shortcut').disabled=busy||!writable();
   $('write-target').classList.toggle('unlinked',!linked());
-  $('commit').textContent='确认写入原文件';$('commit').disabled=busy||!writable()||!linked()||!previewId;
+  $('commit').textContent='确认写入原文件';$('commit').disabled=busy||!writable()||!linked()||!previewId||cellDraft.size>0;updateCellState();
 }
 async function setSource(path){
+  if(!discardCellChanges())return;
   if(busy||!project||!writable())return;
   const code=project.code,key=selectedSheet?.key,methodKey=method?.key,savedRows=rows.map(row=>({...row}));
   const ok=await exclusive(async()=>{await api('/api/workbook/'+encodeURIComponent(code)+'/source',{path});await loadCatalog();});
@@ -210,7 +290,7 @@ function formatRequest(){
   return request;
 }
 $('format-form').onsubmit=async event=>{
-  event.preventDefault();if(busy||!selectedSheet||!writable()||!linked()||!workbookFingerprint)return;
+  event.preventDefault();if(busy||!selectedSheet||!writable()||!linked()||!workbookFingerprint)return;if(!discardCellChanges())return;
   let request;try{request=formatRequest();}catch(error){message(error.message);return;}
   const key=selectedSheet.key,methodKey=method?.key,savedRows=rows.map(row=>({...row})),start=baseView?.start_row||1;
   const ok=await exclusive(async()=>{await api('/api/workbook/'+encodeURIComponent(project.code)+'/format',request);});
@@ -221,31 +301,49 @@ $('method-select').onchange=()=>{if(selectedSheet)selectSheet(selectedSheet.key,
 $('page-first').onclick=()=>{if(selectedSheet)selectSheet(selectedSheet.key,1);};
 $('page-next').onclick=()=>{if(selectedSheet&&rawNext)selectSheet(selectedSheet.key,rawNext);};
 $('calculate').onclick=async()=>{
-  if(busy||!method||!writable())return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在生成预览…';$('action-state').textContent='正在生成预览';const version=inputVersion;
-  try{const payload={project:project.code,method:method.key,entries:LabGrid.entries(rows,method.fields)},data=await api('/api/preview',payload);if(version!==inputVersion)throw Error('输入已变化，请重新计算');previewId=data.id;sheet(data.view);$('results').innerHTML=data.outputs.map((o,i)=>`<div class="result-card"><small>${escape(data.entries[i].date)} · ${escape(data.entries[i].batch)} · 第 ${i+1} 行</small><strong>${escape(o.display)}</strong><span>${escape(o.unit)}</span></div>`).join('');$('results').hidden=false;$('download').href=data.download;$('download').hidden=false;message(`全部 ${data.rows.length} 行${method.kind==='manual'?'已校验':'已计算'}，预览第 ${data.rows[0]}–${data.rows.at(-1)} 行。${linked()?'请核对绿色预览，确认后写入关联原文件。':'尚未关联原文件，请点击上方“关联原文件”；关联后重新预览即可写入。'}`,linked());$('sheet-status').textContent='预览已生成，尚未写入';$('action-state').textContent=linked()?'预览已就绪 · 确认写入原文件':'预览已就绪 · 请先关联原文件';}catch(e){invalidate();message(e.message);}finally{busy=false;$('calculate').disabled=false;$('calculate').textContent=previewLabel();renderSource();}
+  if(busy||!method||!writable())return;if(!discardCellChanges())return;busy=true;$('calculate').disabled=true;$('calculate').textContent='正在生成预览…';$('action-state').textContent='正在生成预览';const version=inputVersion;
+  try{const payload={project:project.code,method:method.key,entries:LabGrid.entries(rows,method.fields)},data=await api('/api/preview',payload);if(version!==inputVersion)throw Error('输入已变化，请重新计算');previewId=data.id;previewKind='calculation';previewContainsEntries=true;workbookFingerprint=data.fingerprint||workbookFingerprint;sheet(data.view);$('results').innerHTML=data.outputs.map((o,i)=>`<div class="result-card"><small>${escape(data.entries[i].date)} · ${escape(data.entries[i].batch)} · 第 ${i+1} 行</small><strong>${escape(o.display)}</strong><span>${escape(o.unit)}</span></div>`).join('');$('results').hidden=false;$('download').href=data.download;$('download').hidden=false;message(`全部 ${data.rows.length} 行${method.kind==='manual'?'已校验':'已计算'}，预览第 ${data.rows[0]}–${data.rows.at(-1)} 行。${linked()?'请核对绿色预览，确认后写入关联原文件。':'尚未关联原文件，请点击上方“关联原文件”；关联后重新预览即可写入。'}`,linked());$('sheet-status').textContent='预览已生成，尚未写入';$('action-state').textContent=linked()?'预览已就绪 · 确认写入原文件':'预览已就绪 · 请先关联原文件';}catch(e){invalidate();message(e.message);}finally{busy=false;$('calculate').disabled=false;$('calculate').textContent=previewLabel();renderSource();}
 };
-$('commit').onclick=async()=>{if(!previewId||busy||!writable()||!linked())return;$('write-receipt').hidden=true;busy=true;writing=true;document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=true);$('commit').disabled=true;try{const data=await api(`/api/commit/${previewId}`,{});message(data.message,true);showWriteReceipt(data);const info=await api(`/api/sheet/${project.code}/${method.key}`);baseView=info.view;workbookFingerprint=info.fingerprint||null;nextRow=info.next_row;rows=[emptyRow()];undo=[];selection=null;anchor=null;previewId=null;refresh();$('results').hidden=true;$('download').hidden=true;$('sheet-status').textContent='原文件写入成功，可录入下一批';$('action-state').textContent='已写入原文件 · 可继续录入';}catch(e){message(e.message);}finally{busy=false;writing=false;renderSource();document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=false);}};
+async function confirmWrite(){
+  finishCellEditor();if(!previewId||cellDraft.size||busy||!writable()||!linked())return;
+  $('write-receipt').hidden=true;busy=true;writing=true;updateCellState();document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=true);$('commit').disabled=true;
+  let committed=false;
+  try{
+    const containsEntries=previewContainsEntries,data=await api(`/api/commit/${previewId}`,{});committed=true;previewId=null;previewKind='calculation';previewContainsEntries=false;message(data.message,true);showWriteReceipt(data);
+    if(containsEntries&&method){rows=[emptyRow()];undo=[];selection=null;anchor=null;entry();}
+    const path=method?`/api/sheet/${encodeURIComponent(project.code)}/${encodeURIComponent(method.key)}`:`/api/book-sheet/${encodeURIComponent(project.code)}/${encodeURIComponent(selectedSheet.key)}?start=${displayedView?.start_row||1}`;
+    const info=await api(path);baseView=info.view;workbookFingerprint=info.fingerprint||null;nextRow=info.next_row||4;
+    sheet(baseView,!!method&&writable());$('results').hidden=true;$('download').hidden=true;$('sheet-status').textContent='原文件写入成功';$('action-state').textContent='已写入原文件 · 可继续录入';
+  }catch(error){message((committed?'已写入原文件，但页面刷新失败，请刷新页面核对：':'')+error.message);}
+  finally{busy=false;writing=false;renderSource();document.querySelectorAll('input[data-key]').forEach(el=>el.readOnly=false);}
+}
+$('commit').onclick=confirmWrite;$('cell-commit').onclick=confirmWrite;
+
 function addRows(newBatch=false){if(!method||busy)return;const n=Number($('add-count').value);if(!Number.isInteger(n)||n<1||rows.length+n>LabGrid.maxRows){message('新增行数须为整数，合计最多200行');return;}const seed=LabGrid.labels(rows)[selection?.r1??rows.length-1]||emptyRow();const next=rows.map(r=>({...r})),batch=newBatch?LabGrid.series([seed.batch||''],1,'batch'):seed.batch;for(let i=0;i<n;i++)next.push({date:seed.date||today(),batch:batch===seed.batch&&newBatch?'':batch,notes:'',_requireBatch:newBatch&&i===0});changed(next);select(next.length-n,'batch');$('entry').querySelector(`input[data-index="${next.length-n}"][data-key="batch"]`)?.focus();}
 $('parallel').onclick=()=>addRows(false);$('add-batch').onclick=()=>addRows(true);
 $('remove-row').onclick=()=>{if(!method||busy||!selection)return;if(rows.length-(selection.r1-selection.r0+1)<1){message('至少保留一行测定');return;}const next=LabGrid.remove(rows,selection.r0,selection.r1);selection=null;anchor=null;changed(next);};
 $('fill-down').onclick=()=>fill(Number($('fill-to').value)-1);$('fill-end').onclick=()=>fill(rows.length-1);
 $('sample').onclick=()=>{if(!method||busy)return;changed(rows.map((r,i)=>({...r,date:r.date||today(),batch:r.batch||`PREVIEW-ONLY-${String(i+1).padStart(3,'0')}`,...Object.fromEntries(method.fields.map(f=>[f.key,f.sample]))})));};
 $('reset').onclick=()=>{if(busy||!method)return;selection=null;anchor=null;changed([{date:today(),batch:'',notes:''}]);};
-$('undo').onclick=()=>{if(busy||!method||!undo.length)return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();};
+$('undo').onclick=()=>{if(busy||!method||!undo.length||!discardCellChanges())return;rows=undo.pop();selection=null;anchor=null;invalidate();refresh();};
 $('mobile-preview').onclick=()=>{$('sheet-scroll').scrollIntoView({behavior:'smooth',block:'center'});};
 async function loadHistory(show=true){
   const data=await api('/api/history');$('history').hidden=!show;
-  $('history').innerHTML=`<h3>预览与写入历史</h3><table><thead><tr><th>项目 / 方法</th><th>批号 / 选区</th><th>结果</th><th>目标行</th><th>状态</th></tr></thead><tbody>${data.map(r=>{const format=r.request.operation==='format';return `<tr><td>${escape(r.request.project)} / ${escape(format?'格式设置 · '+r.request.sheet:r.request.method)}</td><td>${escape(format?r.request.range:[...new Set(r.request.entries?.map(e=>e.batch)||[r.request.batch])].join(' / '))}</td><td>${(r.outputs||[]).map(o=>escape(o.display)+' '+escape(o.unit)).join(' / ')}</td><td>${r.rows?.length?`${r.rows[0]}–${r.rows.at(-1)}`:'—'}</td><td>${r.state==='done'?'已写入':r.state==='removed'?'项目已移除':r.state==='writing'?`待完成写入 <button class="retry-write" data-id="${escape(r.id)}" ${!writable()?'disabled':''}>重试完成写入</button>`:'仅预览'}</td></tr>`;}).join('')}</tbody></table>`;
+  $('history').innerHTML=`<h3>预览与写入历史</h3><table><thead><tr><th>项目 / 方法</th><th>批号 / 选区</th><th>结果</th><th>目标行</th><th>状态</th></tr></thead><tbody>${data.map(r=>{const format=r.request.operation==='format',edit=r.request.operation==='edit';return `<tr><td>${escape(r.request.project)} / ${escape(format?'格式设置 · '+r.request.sheet:edit?'单元格修改 · '+r.request.sheet:r.request.method)}</td><td>${escape(format?r.request.range:edit?(r.request.changes||[]).map(change=>change.ref).join(' / '):[...new Set(r.request.entries?.map(e=>e.batch)||[r.request.batch])].join(' / '))}</td><td>${(r.outputs||[]).map(o=>escape(o.display)+' '+escape(o.unit)).join(' / ')}</td><td>${r.rows?.length?`${r.rows[0]}–${r.rows.at(-1)}`:'—'}</td><td>${r.state==='done'?'已写入':r.state==='removed'?'项目已移除':r.state==='writing'?`待完成写入 <button class="retry-write" data-id="${escape(r.id)}" ${!writable()?'disabled':''}>重试完成写入</button>`:'仅预览'}</td></tr>`;}).join('')}</tbody></table>`;
   $('history').querySelectorAll('.retry-write').forEach(button=>button.onclick=()=>retryWrite(button.dataset.id));
 }
 async function retryWrite(id){
   if(busy||!writable())return;
+  const currentPreview=previewId===id,containsEntries=previewContainsEntries,kind=previewKind,candidateView=displayedView;
+  if(!currentPreview&&!discardCellChanges())return;
   $('write-receipt').hidden=true;let result;
-  const code=project?.code,key=selectedSheet?.key,methodKey=method?.key,savedRows=rows.map(row=>({...row})),start=baseView?.start_row||1,currentPreview=previewId===id;
+  const code=project?.code,key=selectedSheet?.key,methodKey=method?.key,savedRows=rows.map(row=>({...row})),start=baseView?.start_row||1;
   const ok=await exclusive(async()=>{result=await api('/api/commit/'+encodeURIComponent(id),{});});
-  if(!ok)return;
+  if(!ok){if(currentPreview){previewId=id;previewKind=kind;previewContainsEntries=containsEntries;sheet(candidateView);$('download').hidden=false;renderSource();}return;}
+  const clearEntries=currentPreview&&containsEntries;
+  if(clearEntries&&method){rows=[{date:today(),batch:'',notes:''}];undo=[];selection=null;anchor=null;entry();}
   showWriteReceipt(result);
-  if(project?.code===code&&selectedSheet?.key===key&&result.sheet===selectedSheet?.name)await selectSheet(key,start,methodKey,currentPreview&&result.rows?.length?undefined:savedRows);
+  if(project?.code===code&&selectedSheet?.key===key&&result.sheet===selectedSheet?.name)await selectSheet(key,start,methodKey,clearEntries?undefined:savedRows);
   message(result.message||'写入已完成，未重复追加记录。',true);
   try{await loadHistory(true);}catch(error){message('写入已完成，但历史刷新失败：'+error.message);}
 }
@@ -258,36 +356,68 @@ function workbookStatus(){
   sourceFolderStatus();
 }
 function sourceFolderStatus(){
+  $('source-folder-choose').disabled=busy;
   $('source-folder-scan').disabled=busy||!$('source-folder-path').value.trim();
   $('source-folder-bind').hidden=!sourceFolderPreview;
-  $('source-folder-bind').disabled=busy||sourceFolderPreview?.can_bind!==true;
+  $('source-folder-bind').disabled=busy||sourceFolderPreview?.can_bind!==true||!sourceFolderSelected.size;
+  $('source-folder-count').textContent=`已勾选 ${sourceFolderSelected.size} 个`;
 }
 function invalidateSourceFolder(){
-  sourceFolderPreview=null;$('source-folder-results').hidden=true;$('source-folder-results').innerHTML='';sourceFolderStatus();
+  sourceFolderPreview=null;sourceFolderSelected.clear();$('source-folder-results').hidden=true;$('source-folder-results').innerHTML='';$('source-folder-controls').hidden=true;sourceFolderStatus();
 }
-$('source-folder-path').addEventListener('input',()=>{invalidateSourceFolder();$('source-folder-status').textContent='路径已更改，请扫描后核对识别结果。';});
+function chooseSourceFolder(path){
+  if(path!==$('source-folder-path').value){$('source-folder-path').value=path;invalidateSourceFolder();$('source-folder-status').textContent='文件夹已选择，请扫描后勾选需要关联的文件。';}
+}
+async function browseSourceFolder(path){
+  if(folderBrowserBusy)return;folderBrowserBusy=true;$('folder-browser-confirm').disabled=true;$('folder-browser-status').textContent='正在读取服务器目录…';
+  $('folder-browser-list').querySelectorAll('button').forEach(button=>button.disabled=true);
+  try{
+    const result=await api('/api/source-folder/browse'+(path?'?path='+encodeURIComponent(path):''));folderBrowser=result;
+    $('folder-browser-path').textContent=result.path||'服务器磁盘';$('folder-browser-up').disabled=!result.parent;$('folder-browser-confirm').disabled=!result.path;
+    $('folder-browser-list').innerHTML=result.directories.map(item=>`<button type="button" data-path="${escape(item.path)}"><span aria-hidden="true">📁</span> ${escape(item.name)}<span aria-hidden="true">›</span></button>`).join('');
+    $('folder-browser-list').querySelectorAll('button').forEach(button=>button.onclick=()=>browseSourceFolder(button.dataset.path));
+    $('folder-browser-status').textContent=(result.directories.length?'点击目录进入，再选择当前文件夹。':'此文件夹下没有可进入的子文件夹，可选择当前文件夹。')+(result.truncated?' 当前只显示部分目录（最多500项）；请进入更具体的目录继续查找。':'');
+  }catch(error){folderBrowser=null;$('folder-browser-list').innerHTML='';$('folder-browser-up').disabled=true;$('folder-browser-status').textContent=error.message;}
+  finally{folderBrowserBusy=false;}
+}
+$('source-folder-choose').onclick=()=>{if(busy)return;$('folder-browser').showModal();return browseSourceFolder($('source-folder-path').value||null);};
+$('folder-browser-roots').onclick=()=>browseSourceFolder(null);
+$('folder-browser-up').onclick=()=>{if(folderBrowser?.parent)return browseSourceFolder(folderBrowser.parent);};
+$('folder-browser-cancel').onclick=()=>{$('folder-browser').close();};
+$('folder-browser-confirm').onclick=()=>{if(folderBrowserBusy||!folderBrowser?.path)return;chooseSourceFolder(folderBrowser.path);$('folder-browser').close();};
+function renderSourceFolder(){
+  if(!sourceFolderPreview)return;
+  const query=$('source-folder-search').value.trim().toLocaleLowerCase(),entries=sourceFolderPreview.entries||[],issues=sourceFolderPreview.issues||[];
+  const shown=entries.filter(item=>[item.name,item.project,item.month,item.path,item.message].some(value=>String(value||'').toLocaleLowerCase().includes(query)));
+  $('source-folder-results').innerHTML='<table><thead><tr><th>关联</th><th>项目</th><th>月份</th><th>原文件</th><th>识别结果</th></tr></thead><tbody>'+shown.map(item=>`<tr><td><input type="checkbox" data-folder-id="${escape(item.id)}" aria-label="关联 ${escape(item.name||item.path)}" ${sourceFolderSelected.has(item.id)?'checked':''} ${!item.selectable?'disabled':''}></td><td>${escape(item.name||'未识别')}<small>${escape(item.project)}</small></td><td>${escape(item.month||'—')}</td><td>${escape(item.path)}</td><td>${escape(item.message||({import:'待导入关联',link:'待关联',relink:'待迁移关联',linked:'已关联',conflict:'不关联：存在冲突',unrecognized:'不关联：未识别'}[item.state])||item.state)}</td></tr>`).join('')+'</tbody></table>'+(shown.length?'':'<p class="card-note">没有匹配的文件，已勾选项仍保留。</p>')+(issues.length?'<ul class="folder-issues">'+issues.map(issue=>`<li>${escape(issue)}</li>`).join('')+'</ul>':'');
+  $('source-folder-results').querySelectorAll('input[data-folder-id]').forEach(input=>input.onchange=()=>{input.checked?sourceFolderSelected.add(input.dataset.folderId):sourceFolderSelected.delete(input.dataset.folderId);sourceFolderStatus();});
+  $('source-folder-results').hidden=false;$('source-folder-controls').hidden=false;sourceFolderStatus();
+}
+$('source-folder-search').addEventListener('input',renderSourceFolder);
+$('source-folder-select').onclick=()=>{if(busy||!sourceFolderPreview)return;const groups=new Map();for(const item of sourceFolderPreview.entries.filter(item=>item.selectable)){const key=item.project+'|'+item.month;groups.set(key,(groups.get(key)||[]).concat(item));}for(const items of groups.values())if(items.length===1)sourceFolderSelected.add(items[0].id);renderSourceFolder();};
+$('source-folder-clear').onclick=()=>{if(busy)return;sourceFolderSelected.clear();renderSourceFolder();};
 $('source-folder-form').onsubmit=async event=>{
   event.preventDefault();if(busy)return;
   const path=$('source-folder-path').value.trim();if(!path)return;
-  invalidateSourceFolder();
-  $('source-folder-status').textContent='正在识别项目和月份…';
+  if(!discardCellChanges())return;
+  invalidateSourceFolder();$('source-folder-search').value='';$('source-folder-status').textContent='正在识别项目和月份…';
   const ok=await exclusive(async()=>{
     sourceFolderPreview=await api('/api/source-folder/scan',{path});
-    const entries=sourceFolderPreview.entries||[],issues=sourceFolderPreview.issues||[];
-    $('source-folder-results').innerHTML='<table><thead><tr><th>项目</th><th>月份</th><th>原文件</th><th>识别结果</th></tr></thead><tbody>'+entries.map(item=>`<tr><td>${escape(item.name)}<small>${escape(item.project)}</small></td><td>${escape(item.month)}</td><td>${escape(item.path)}</td><td>${escape(item.message||({import:'待导入关联',link:'待关联',relink:'待迁移关联',linked:'已关联',conflict:'冲突'}[item.state])||item.state)}</td></tr>`).join('')+'</tbody></table>'+(issues.length?'<ul class="folder-issues">'+issues.map(issue=>`<li>${escape(issue)}</li>`).join('')+'</ul>':'');
-    $('source-folder-results').hidden=false;
-    $('source-folder-status').textContent=`识别到 ${entries.length} 个工作簿。`+(sourceFolderPreview.can_bind?'核对项目、月份和路径后确认关联；原文件保持原样。':'请处理识别问题后重新扫描。');
+    sourceFolderSelected=new Set(sourceFolderPreview.entries.filter(item=>item.selectable&&item.selected).map(item=>item.id));renderSourceFolder();
+    $('source-folder-status').textContent=`发现 ${sourceFolderPreview.entries.length} 个工作簿。勾选需要关联的文件；无法识别的文件不关联，同项目同月份只选一本。扫描和关联不修改原文件。`;
   });
-  if(!ok)$('source-folder-status').textContent='扫描未完成，请核对路径及上方错误后重试。';
+  if(!ok)$('source-folder-status').textContent='扫描未完成，请核对所选目录及上方错误后重试。';
 };
 $('source-folder-bind').onclick=async()=>{
-  if(busy||sourceFolderPreview?.can_bind!==true)return;
-  const request={path:sourceFolderPreview.root,fingerprint:sourceFolderPreview.fingerprint};
+  if(busy||sourceFolderPreview?.can_bind!==true||!sourceFolderSelected.size)return;
+  const selected=sourceFolderPreview.entries.filter(item=>sourceFolderSelected.has(item.id)),groups=new Set();
+  for(const item of selected){const key=item.project+'|'+item.month;if(groups.has(key)){message('同一项目同一月份只能勾选一本工作簿，请取消重复候选。');return;}groups.add(key);}
+  const request={path:sourceFolderPreview.root,fingerprint:sourceFolderPreview.fingerprint,selected:selected.map(item=>item.id)};
   let result;
   const ok=await exclusive(async()=>{
     result=await api('/api/source-folder/bind',request);selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();
   });
-  if(ok){await selectProject(catalog[0]?.code);showWorkspace('entry');message(`总文件夹已关联：新增 ${result.imported} 个，关联 ${result.linked} 个，已有 ${result.skipped} 个。原文件未修改，可选择项目和月份开始录入。`,true);}
+  if(ok){await selectProject(catalog[0]?.code);showWorkspace('entry');message(`勾选文件已关联：新增 ${result.imported} 个，关联 ${result.linked} 个，已有 ${result.skipped} 个。未勾选的文件未关联，原文件未修改。`,true);}
   else{invalidateSourceFolder();$('source-folder-status').textContent=result?'关联已完成，但目录刷新失败，请刷新页面核对。':'关联未完成，请重新扫描并核对。';}
 };
 for(const id of ['project-code','project-name','workbook-file'])$(id).addEventListener('input',workbookStatus);
@@ -331,6 +461,7 @@ $('import-form').onsubmit=async event=>{
   if(ok){$('import-panel').open=false;await selectProject(code);showWorkspace('entry');message('副本已上传，工作表目录已生成；请点击“关联原文件”后再确认写入。',true);}
 };
 async function changeMonth(month){
+  if(!discardCellChanges()){ $('month-select').value=catalogInfo.active_month;return; }
   const code=project?.code,key=selectedSheet?.key;
   if(await exclusive(async()=>{const result=await api('/api/month',{month});selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();})){await selectProject(catalog.some(item=>item.code===code)?code:catalog[0]?.code,key);}
   else $('month-select').value=catalogInfo.active_month;
@@ -415,7 +546,7 @@ async function loadMonthPreview(code,sheetName,start=1){
   finally{if(requestId===monthPreviewRequest)monthPreviewBusy=false;}
 }
 $('new-month').addEventListener('input',()=>invalidateMonthPreview(true));
-$('create-month').onclick=()=>{invalidateMonthPreview();return loadMonthPreview(project?.code,selectedSheet?.name);};
+$('create-month').onclick=()=>{if(!discardCellChanges())return;invalidateMonthPreview();return loadMonthPreview(project?.code,selectedSheet?.name);};
 $('month-preview-project').onchange=()=>loadMonthPreview($('month-preview-project').value);
 $('month-preview-sheet-select').onchange=()=>loadMonthPreview($('month-preview-project').value,$('month-preview-sheet-select').value);
 $('month-preview-first').onclick=()=>{if(monthPreview&&!monthPreviewBusy)return loadMonthPreview(monthPreview.project,monthPreview.sheet,1);};

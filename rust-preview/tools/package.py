@@ -52,16 +52,27 @@ if not startup or not all(startup.values()):raise RuntimeError('Startup regressi
 format_checks=json.loads((repo/'runtime/format-smoke-result.json').read_text(encoding='utf-8'))
 if not format_checks or not all(format_checks.values()) or format_checks.get('explicit_date_format_converts_compact_date_for_excel_1900_and_1904') is not True:raise RuntimeError('Workbook format regression did not pass')
 source_checks=json.loads((repo/'runtime/source-smoke-result.json').read_text(encoding='utf-8'))
+cell_edits=json.loads((repo/'runtime/cell-edit-smoke-result.json').read_text(encoding='utf-8'))
+if (cell_edits.get('ok') is not True or cell_edits.get('version')!=version or cell_edits.get('executable_sha256')!=exe_sha256
+    or not all(cell_edits.get(key) is True for key in ('preview_does_not_write_source_or_mirror', 'direct_edit_source_and_mirror_confirmed', 'layout_styles_and_formulas_preserved', 'formula_and_shared_formula_readonly', 'merged_nonanchor_rejected', 'protected_cells_rejected', 'leading_zero_batch_preserved', 'formula_like_text_is_literal', 'zero_recalculates_supported_formulas', 'unknown_formula_cache_invalidated', 'date_1900_1904_and_iso_types_preserved', 'draft_repreview_and_revert_no_write', 'calculation_preview_cells_amendable', 'source_and_mirror_conflicts_rejected', 'stale_or_other_project_preview_rejected', 'validation_limits_rejected', 'write_backup_and_idempotent_confirmation', 'source_lock_recovers_through_history', 'pending_write_blocks_new_edits', 'history_month_readonly'))):
+    raise RuntimeError('Cell editing regression did not pass for this executable')
 folder_checks=json.loads((repo/'runtime/folder-smoke-result.json').read_text(encoding='utf-8'))
 if (folder_checks.get('ok') is not True or folder_checks.get('version')!=version
     or folder_checks.get('executable_sha256')!=exe_sha256
     or not all(folder_checks.get(key) is True for key in (
+        'server_directory_browser_local_roots_children_parent_and_data_exclusion',
+        'directory_browser_limit_is_visible_not_silent',
+        'recursive_depth_and_scan_file_count_size_limits_enforced',
+        'flexible_nested_directories_filename_dates_and_selected_project_year_month_roots',
+        'conflicting_dates_and_ambiguous_projects_never_guessed',
+        'empty_unknown_unselectable_and_duplicate_ids_rejected',
+        'selected_subset_only_imported',
         'multiple_projects_chinese_names_cross_year_and_month_formats',
         'scan_has_no_data_writes_and_ignores_locks_backups',
         'changed_source_invalidates_confirmation',
-        'same_project_month_multiple_files_rejected_without_partial_import',
+        'duplicate_project_month_requires_single_explicit_choice',
         'project_code_collision_not_guessed',
-        'misplaced_workbooks_reported_instead_of_silently_skipped',
+        'unrecognized_candidates_skippable_without_importing',
         'directory_junctions_and_reparsed_roots_rejected',
         'mid_batch_failure_rolls_back_files_links_names_and_empty_month',
         'associations_saved_latest_source_month_writable_old_month_readonly',
@@ -69,7 +80,7 @@ if (folder_checks.get('ok') is not True or folder_checks.get('version')!=version
         'initial_mirrors_exactly_match_original_bytes',
         'repeated_scan_bind_idempotent_and_no_duplicate_mirrors',
         'moved_root_and_renamed_folder_reuse_existing_projects_after_hash_and_structure_check',
-        'changed_moved_file_rejected_without_partial_reassociation',
+        'selected_changed_moved_file_rejected_without_partial_reassociation',
         'confirmed_migration_only_changes_links_not_mirrors_or_originals',
         'existing_different_source_link_not_replaced',
         'existing_unlinked_mirror_associated_without_overwrite',
@@ -119,13 +130,20 @@ if (native_blank.get('ok') is not True or native_blank.get('version')!=version
         'example_and_fixed_cells_preserved','keep_formula_cache_preserved',
         'unknown_formula_preserved','methods_calculate_and_commit','metadata_preserved','copies_only'))):
     raise RuntimeError('Native Excel blank calculation regression did not pass for this executable')
-ui_directory=repo/'runtime/ui-qa/v0.0.8'
+native_edits=json.loads((repo/'runtime/native-excel-cell-edits.json').read_text(encoding='utf-8'))
+if native_edits.get('native_edit_layout_preserved') is not True:raise RuntimeError('Native Excel edited workbook dimensions and frozen panes changed')
+if (native_edits.get('ok') is not True or native_edits.get('version')!=version or native_edits.get('executable_sha256')!=exe_sha256
+    or not all(native_edits.get(key) is True for key in ('copies_only', 'normal_open_no_repair', 'source_hashes_unchanged', 'business_originals_hash_unchanged', 'owned_excel_exited', 'cell_styles_preserved', 'styles_xml_byte_preserved', 'sheet_metadata_preserved', 'existing_row_attributes_preserved', 'only_target_or_required_calculation_parts_changed', 'direct_edit_commit_matches_preview', 'candidate_edit_commit_matches_preview', 'date_native_display_correct', 'leading_zero_batch_preserved', 'supported_formula_cache_recalculated', 'unknown_formula_cache_cleared_with_warning', 'formula_and_protected_cells_rejected', 'merged_non_anchor_rejected'))):
+    raise RuntimeError('Native Excel cell editing regression did not pass for this executable')
+ui_directory=repo/'runtime/ui-qa/v0.0.9'
 if any(path.suffix.lower() in ('.xlsx','.sqlite3') for path in ui_directory.rglob('*') if path.is_file()):raise RuntimeError('Browser evidence contains business files or a database')
 ui=json.loads((ui_directory/'result.json').read_text(encoding='utf-8'))
 if ui.get('ok') is not True or ui.get('version')!=version or ui.get('executable_sha256')!=exe_sha256 or ui.get('manual_source_write') is not True:raise RuntimeError('Browser regression did not pass for this executable')
 if not set(('unlink_retains_project_source','remove_import_retains_source_history','remove_last_empty_catalog','month_preview_actual_blank_headers_formulas','month_preview_cancel_no_files','month_preview_confirm','month_preview_responsive','sheet_rows_continuous_after_preview_commit_format','compact_header_preserves_visible_entry_actions_and_target')).issubset(ui.get('checks',[])):raise RuntimeError('Project management, compact header, continuous rows and month preview browser regression did not pass')
 if not set(('no_rule_editor','month_preview_original_comparison','month_preview_clear_keep_adjustments','month_preview_failed_adjustment_retains_table','month_preview_blocked_destination_still_renders')).issubset(ui.get('checks',[])):raise RuntimeError('Automatic template preview browser regression did not pass')
 if not set(('folder_scanning_and_binding','scan_no_write','repeat_idempotent')).issubset(ui.get('checks',[])):raise RuntimeError('Total-folder association browser regression did not pass')
+if not set(('server_folder_browser', 'folder_filter_keeps_selection', 'folder_selected_ids', 'cell_edit_preview_confirm_source', 'cell_edit_discard_guard', 'formula_cells_readonly', 'mobile_cell_edit')).issubset(ui.get('checks',[])):raise RuntimeError('Folder selection and direct cell editing browser regression did not pass')
+
 generic_source=json.loads((repo/'runtime/generic-workbook-regression.json').read_text(encoding='utf-8'))
 if (generic_source.get('version')!=version or generic_source.get('executable_sha256')!=exe_sha256 or generic_source.get('calculation_and_write_roundtrips')!=124
     or generic_source.get('total_sheets')!=138 or generic_source.get('source_files_unchanged') is not True
@@ -141,7 +159,7 @@ for report in (checks,monthly,auth,formula,imports,lan,startup,format_checks,sou
 if subprocess.check_output(['git','status','--porcelain'],cwd=repo,text=True).strip():raise RuntimeError('Commit the reviewed release source before packaging')
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=repo,text=True).strip()
-if branch!='feat/v0.0.8-folder-linking':raise RuntimeError('Package from the isolated v0.0.8 branch only')
+if branch!='feat/v0.0.9-select-edit':raise RuntimeError('Package from the isolated v0.0.9 branch only')
 release.mkdir(parents=True)
 portable=release/f'labwork-v{version}-Windows-x64.zip'
 with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
@@ -154,11 +172,13 @@ with zipfile.ZipFile(portable,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
 with zipfile.ZipFile(portable) as z:
     if any(n.endswith(('.xlsx','.sqlite3')) for n in z.namelist()):raise RuntimeError('Business data found in portable package')
 subprocess.run(['git','archive','--format=zip','-o',str(release/f'labwork-v{version}-Source.zip'),commit],cwd=repo,check=True)
-for source in [root/'README.md',repo/'docs/版本更新-v0.0.8.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/native-excel-blank-calculations.json',repo/'runtime/unsupported-formula-preservation.json',repo/'runtime/installer-settings-regression.json',repo/'runtime/installer-firewall-regression.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/folder-smoke-result.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
+for source in [root/'README.md',repo/'docs/版本更新-v0.0.9.md',repo/'docs/命名规范.md',repo/'runtime/preserve-format-smoke-result.json',repo/'runtime/original-format-preservation.json',repo/'runtime/native-excel-layout.json',repo/'runtime/native-excel-blank-calculations.json',repo/'runtime/unsupported-formula-preservation.json',repo/'runtime/installer-settings-regression.json',repo/'runtime/installer-firewall-regression.json',repo/'runtime/rust-smoke-result.json',repo/'runtime/month-smoke-result.json',repo/'runtime/auth-smoke-result.json',repo/'runtime/formula-smoke-result.json',repo/'runtime/format-smoke-result.json',repo/'runtime/source-smoke-result.json',repo/'runtime/folder-smoke-result.json',repo/'runtime/cell-edit-smoke-result.json',repo/'runtime/native-excel-cell-edits.json',repo/'runtime/import-smoke-result.json',repo/'runtime/lan-smoke-result.json',repo/'runtime/startup-smoke-result.json']:
     shutil.copyfile(source,release/source.name)
 shutil.copytree(ui_directory,release/'browser-qa')
 (release/'generic-workbook-regression.json').write_text(json.dumps(generic,indent=2),encoding='utf-8')
 manifest={'project':'labwork','release_name':f'labwork-v{version}','product_name':'labwork','binary_name':'labwork.exe','version':version,'git_commit':commit,'branch':branch,'executable_sha256':exe_sha256,'exe_bytes':exe.stat().st_size,'portable_zip_bytes':portable.stat().st_size,'listen':'127.0.0.1:18810','scope':'LAN validation with associated server-local workbook as source of truth','regression':checks,'month_regression':monthly,'unsupported_formula_preservation':unsupported_formula,'installer_settings_regression':installer_settings,'installer_firewall_regression':installer_firewall,'installer_firewall_live_admin_checked':False,'auth_regression':auth,'formula_regression':formula,'format_regression':format_checks,'source_regression':source_checks,'import_regression':imports,'lan_regression':lan,'startup_regression':startup,'generic_workbook_regression':generic,'preserve_original_format_regression':preserved,'all_original_format_preservation':original_layout,'native_excel_layout_regression':native_excel,'browser_regression':ui,'browser_evidence':'browser-qa/result.json','native_tray_visual_checked':False,'unit_tests_note':'cargo test --locked passed tray::tests::tray_registers_stops_and_cleans_up (automatic tray registration and cleanup, not visual inspection)','native_excel_normal_open_checked':True,'native_excel_column_widths_and_frozen_panes_checked':True,'complete_office_formula_recalculation_checked':False}
+manifest['cell_edit_regression']=cell_edits
+manifest['native_excel_cell_edits_regression']=native_edits
 manifest['folder_association_regression']=folder_checks
 manifest['native_excel_blank_calculations_regression']=native_blank
 (release/'发布信息.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')

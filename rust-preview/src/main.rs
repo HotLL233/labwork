@@ -138,14 +138,20 @@ struct SourceRequest {path:Option<String>}
 #[derive(Deserialize)]
 struct SourceImportRequest {path:String, #[serde(default)] name:String}
 #[derive(Deserialize)]
-struct FolderRequest {path:String, #[serde(default)] fingerprint:String}
+struct FolderRequest {path:String, #[serde(default)] fingerprint:String, #[serde(default)] selected:Option<Vec<String>>}
+#[derive(Deserialize)]
+struct FolderBrowseQuery {path:Option<String>}
+async fn browse_source_folder(State(state):State<Shared>,Query(query):Query<FolderBrowseQuery>)->Result<Json<Value>,Error>{
+    let app=state.lock().unwrap();
+    Ok(Json(folder::browse(&app,query.path.as_deref())?))
+}
 async fn scan_source_folder(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<FolderRequest>)->Result<Json<Value>,Error>{
     let app=state.lock().unwrap();authorize(&app,&headers)?;
     Ok(Json(serde_json::to_value(folder::scan(&app,&request.path)?).map_err(error)?))
 }
 async fn bind_source_folder(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<FolderRequest>)->Result<Json<Value>,Error>{
     let app=state.lock().unwrap();authorize(&app,&headers)?;
-    Ok(Json(folder::bind(&app,&request.path,&request.fingerprint)?))
+    Ok(Json(folder::bind(&app,&request.path,&request.fingerprint,request.selected.as_deref())?))
 }
 async fn import_source(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<SourceImportRequest>)->Result<Json<Value>,Error>{
     let app=state.lock().unwrap();authorize(&app,&headers)?;
@@ -234,7 +240,33 @@ async fn preview(State(state):State<Shared>,headers:HeaderMap,Json(mut request):
     let mut snapshot=json!(&method);snapshot["source_link"]=json!(binding);snapshot["workspace_before_hash"]=json!(workspace_before_hash);snapshot["preserves_layout"]=json!(true);
     app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,'preview',?8)",params![id,created,serde_json::to_string(&request).unwrap(),serde_json::to_string(&outputs).unwrap(),hash(&bytes),hash(&candidate),serde_json::to_string(&rows).unwrap(),serde_json::to_string(&snapshot).unwrap()]).map_err(error)?;
     fs::write(app.home.join("previews").join(format!("{id}.xlsx")),candidate).map_err(error)?;
-    Ok(Json(json!({"id":id,"entries":request.entries,"outputs":outputs,"rows":rows,"view":view,"state":"preview","download":format!("/api/download/{id}")})))
+    Ok(Json(json!({"id":id,"entries":request.entries,"outputs":outputs,"rows":rows,"view":view,"sheet":method.sheet,"fingerprint":hash(&bytes),"state":"preview","download":format!("/api/download/{id}")})))
+}
+#[derive(Deserialize)]
+struct CellEditRequest {sheet:String,fingerprint:String,changes:Vec<workbook::CellChange>,#[serde(default)] preview_id:Option<String>,#[serde(default="first_row")] start:u32}
+async fn edit_preview(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<CellEditRequest>)->Result<Json<Value>,Error>{
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    let month=months::select(&app.home,&headers)?;months::writable(&app.home,&month)?;pending_write(&app,&month,Some(&code))?;
+    let (before,binding)=source::read(&app,&month,&code)?;let before_hash=hash(&before);
+    if request.fingerprint!=before_hash{return Err((StatusCode::CONFLICT,Json(json!({"error":"工作簿已变化，请刷新原表后重新编辑；未写入文件"}))));}
+    let workspace_before_hash=hash(&fs::read(app.book(&code,&month)?).map_err(error)?);
+    let base=if let Some(id)=&request.preview_id{
+        if id.len()!=32||!id.bytes().all(|c|c.is_ascii_hexdigit()){return Err(error("预览编号无效"));}
+        let (raw,old_before,after,status,snapshot):(String,String,String,String,String)=app.db.query_row("SELECT request,before_hash,after_hash,state,method_snapshot FROM previews WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).map_err(|_|error("待编辑的预览不存在"))?;
+        let original:Value=serde_json::from_str(&raw).map_err(error)?;let snapshot:Value=serde_json::from_str(&snapshot).map_err(error)?;
+        if status!="preview"||original["project"]!=code||original["month"]!=month||old_before!=before_hash||snapshot["workspace_before_hash"]!=workspace_before_hash||snapshot["preserves_layout"]!=true||snapshot["source_link"]!=json!(binding){return Err((StatusCode::CONFLICT,Json(json!({"error":"待编辑预览已过期或属于其他工作簿，请重新预览"}))));}
+        let base=fs::read(app.home.join("previews").join(format!("{id}.xlsx"))).map_err(error)?;
+        if hash(&base)!=after{return Err(error("预览副本校验失败，未写入"));}base
+    }else{before.clone()};
+    let (candidate,changes,warnings)=workbook::edit_cells(&base,&request.sheet,&request.changes).map_err(error)?;
+    let rows=request.changes.iter().filter_map(|c|c.reference.trim_start_matches(|c:char|c.is_ascii_uppercase()).parse::<u32>().ok()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    let view=if let Some(method)=app.mapped_methods(&code,&candidate).into_iter().find(|m|m.sheet==request.sheet){workbook::view(&candidate,&method,&rows)}else{workbook::raw_view(&candidate,&request.sheet,request.start)}.map_err(error)?;
+    let saved_request=json!({"month":month,"project":code,"method":"__edit__","operation":"edit","sheet":request.sheet,"changes":changes,"entries":[]});
+    let snapshot=json!({"kind":"edit","sheet":request.sheet,"source_link":binding,"workspace_before_hash":workspace_before_hash,"preserves_layout":true});
+    let id=random_id();let created=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;let path=app.home.join("previews").join(format!("{id}.xlsx"));
+    fs::write(&path,&candidate).map_err(error)?;
+    if let Err(e)=app.db.execute("INSERT INTO previews(id,created,request,outputs,before_hash,after_hash,rows,state,method_snapshot) VALUES(?1,?2,?3,'[]',?4,?5,?6,'preview',?7)",params![id,created,saved_request.to_string(),before_hash,hash(&candidate),serde_json::to_string(&rows).unwrap(),snapshot.to_string()]){let _=fs::remove_file(path);return Err(error(e));}
+    Ok(Json(json!({"id":id,"state":"preview","sheet":request.sheet,"fingerprint":before_hash,"candidate_fingerprint":hash(&candidate),"view":view,"changes":changes,"warnings":warnings,"rows":rows,"download":format!("/api/download/{id}")})))
 }
 async fn commit(State(state):State<Shared>,headers:HeaderMap,Path(id):Path<String>) -> Result<Json<Value>,Error> {
     let app=state.lock().unwrap(); authorize(&app,&headers)?;
@@ -365,9 +397,10 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
         .route("/login",get(auth::page)).route("/login.js",get(auth::script)).route("/api/login",post(auth::login)).route("/api/logout",post(auth::logout))
         .route("/api/workbook/{project}/download",get(download_book))
         .route("/api/workbook/{project}/format",post(format_workbook))
+        .route("/api/workbook/{project}/edit-preview",post(edit_preview))
         .route("/api/workbook/{project}/source",post(bind_source))
         .route("/api/workbook/{project}/source-import",post(import_source))
-        .route("/api/source-folder/scan",post(scan_source_folder)).route("/api/source-folder/bind",post(bind_source_folder))
+        .route("/api/source-folder/browse",get(browse_source_folder)).route("/api/source-folder/scan",post(scan_source_folder)).route("/api/source-folder/bind",post(bind_source_folder))
         .route("/api/workbook/{project}/remove",post(remove_workbook))
         .route("/api/month",post(choose_month)).route("/api/month/preview",post(preview_month)).route("/api/month-rules/{project}",post(month_rules)).route("/api/book-sheet/{project}/{sheet}",get(raw_sheet))
         .route("/api/workbook/{project}",post(bind_workbook).layer(DefaultBodyLimit::max(import::MAX_BYTES)))
