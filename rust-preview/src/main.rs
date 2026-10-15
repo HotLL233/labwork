@@ -3,6 +3,7 @@ mod config;
 mod formula;
 mod months;
 mod source;
+mod folder;
 mod auth;
 mod import;
 mod calc;
@@ -114,7 +115,7 @@ async fn catalog(State(state): State<Shared>,headers:HeaderMap) -> Result<Json<V
         projects.push(json!({"code":code,"name":names.get(code).cloned().unwrap_or_else(||code.into()),"methods":methods,"workbook_path":path.display().to_string(),"source_link":source::get(&app.db,&month,code)?,"source_error":source_error,"available":true,"rules_confirmed":confirmed,"sheets":sheets.iter().enumerate().map(|(i,name)|json!({"name":name,"key":format!("s{i}"),"method_key":methods.iter().find(|m|m.sheet.trim()==name.trim()).map(|m|&m.key),"reason":if methods.iter().any(|m|m.sheet.trim()==name.trim()){None}else{workbook::generic_error(&bytes,name)}})).collect::<Vec<_>>()}));
     }
     projects.sort_by(|a,b|a["code"].as_str().cmp(&b["code"].as_str()));
-    Ok(Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"lan_url":if app.lan_ip.is_empty(){None}else{Some(format!("http://{}:{}",app.lan_ip,app.port))},"data_directory":app.home.display().to_string(),"projects":projects,"active_month":month,"current_month":months::current(),"months":all_months,"writable":months::writable(&app.home,&month).is_ok(),"month_ready":true,"monthly_rules":monthly_rules})))
+    Ok(Json(json!({"version":env!("CARGO_PKG_VERSION"),"port":app.port,"lan_url":if app.lan_ip.is_empty(){None}else{Some(format!("http://{}:{}",app.lan_ip,app.port))},"data_directory":app.home.display().to_string(),"source_folder":folder::saved(&app.db)?,"projects":projects,"active_month":month,"current_month":months::current(),"months":all_months,"writable":months::writable(&app.home,&month).is_ok(),"month_ready":true,"monthly_rules":monthly_rules})))
 }
 #[derive(Deserialize,Default)]
 struct ImportQuery {#[serde(default)] name:String}
@@ -136,6 +137,16 @@ struct MonthPreviewRequest {month:String,#[serde(default)] project:Option<String
 struct SourceRequest {path:Option<String>}
 #[derive(Deserialize)]
 struct SourceImportRequest {path:String, #[serde(default)] name:String}
+#[derive(Deserialize)]
+struct FolderRequest {path:String, #[serde(default)] fingerprint:String}
+async fn scan_source_folder(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<FolderRequest>)->Result<Json<Value>,Error>{
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    Ok(Json(serde_json::to_value(folder::scan(&app,&request.path)?).map_err(error)?))
+}
+async fn bind_source_folder(State(state):State<Shared>,headers:HeaderMap,Json(request):Json<FolderRequest>)->Result<Json<Value>,Error>{
+    let app=state.lock().unwrap();authorize(&app,&headers)?;
+    Ok(Json(folder::bind(&app,&request.path,&request.fingerprint)?))
+}
 async fn import_source(State(state):State<Shared>,Path(code):Path<String>,headers:HeaderMap,Json(request):Json<SourceImportRequest>)->Result<Json<Value>,Error>{
     let app=state.lock().unwrap();authorize(&app,&headers)?;
     let month=months::select(&app.home,&headers)?;
@@ -343,7 +354,7 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
     let db=Connection::open(home.join("preview.sqlite3"))?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY,created INTEGER NOT NULL,request TEXT NOT NULL,outputs TEXT NOT NULL,before_hash TEXT NOT NULL,after_hash TEXT NOT NULL,rows TEXT NOT NULL,state TEXT NOT NULL,method_snapshot TEXT NOT NULL);")?;
-    access.restore(&db)?;source::initialize(&db)?;
+    access.restore(&db)?;source::initialize(&db)?;folder::initialize(&db)?;
     let (shutdown_tx,shutdown_rx)=tokio::sync::oneshot::channel::<()>();
     #[cfg(windows)]
     let _tray=if tray_mode {Some(tray::start(home.clone(),port,shutdown_tx)?)}else{drop(shutdown_tx);None};
@@ -356,6 +367,7 @@ async fn run(tray_mode:bool) -> Result<(),Box<dyn std::error::Error>> {
         .route("/api/workbook/{project}/format",post(format_workbook))
         .route("/api/workbook/{project}/source",post(bind_source))
         .route("/api/workbook/{project}/source-import",post(import_source))
+        .route("/api/source-folder/scan",post(scan_source_folder)).route("/api/source-folder/bind",post(bind_source_folder))
         .route("/api/workbook/{project}/remove",post(remove_workbook))
         .route("/api/month",post(choose_month)).route("/api/month/preview",post(preview_month)).route("/api/month-rules/{project}",post(month_rules)).route("/api/book-sheet/{project}/{sheet}",get(raw_sheet))
         .route("/api/workbook/{project}",post(bind_workbook).layer(DefaultBodyLimit::max(import::MAX_BYTES)))

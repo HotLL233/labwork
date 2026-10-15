@@ -78,6 +78,38 @@ def sheet_paths(members):
     return {s.attrib['name']: 'xl/' + relations[s.attrib['{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id']] for s in ET.fromstring(members['xl/workbook.xml']).find('s:sheets', NS)}
 
 
+def formula_arithmetic(tree):
+    def unwrap(text):
+        guarded = re.fullmatch(r'IF\(OR\(([^()]*)\),"",(.*)\)', text)
+        if guarded:
+            assert all(re.fullmatch(r'\$?[A-Z]+\d+=""', condition) for condition in guarded[1].split(',')), text
+            return guarded[2]
+        return text
+    def position(ref):
+        col, row = re.fullmatch(r'([A-Z]+)(\d+)', ref).groups()
+        number = 0
+        for letter in col: number = number * 26 + ord(letter) - 64
+        return int(row), number
+    def translate(expression, row_delta, col_delta):
+        def shift(match):
+            absolute_col, col, absolute_row, row = match.groups()
+            number = position(col + '1')[1] + (0 if absolute_col else col_delta)
+            letters = ''
+            while number:
+                number, digit = divmod(number - 1, 26); letters = chr(65 + digit) + letters
+            return absolute_col + letters + absolute_row + str(int(row) + (0 if absolute_row else row_delta))
+        return re.sub(r'(?<![A-Za-z0-9_.])(\$?)([A-Z]+)(\$?)(\d+)', shift, expression)
+    formulas = {cell.attrib['r']: cell.find('s:f', NS) for cell in tree.findall('.//s:c', NS) if cell.find('s:f', NS) is not None}
+    masters = {formula.attrib['si']: (position(ref), unwrap(formula.text)) for ref, formula in formulas.items() if formula.attrib.get('t') == 'shared' and formula.text}
+    result = {}
+    for ref, formula in formulas.items():
+        if formula.text: result[ref] = unwrap(formula.text)
+        else:
+            origin, expression = masters[formula.attrib['si']]; row, col = position(ref)
+            result[ref] = translate(expression, row - origin[0], col - origin[1])
+    return result
+
+
 def verify_month(before, after, rules):
     original, blank = parts(before), parts(after)
     paths = sheet_paths(original)
@@ -90,6 +122,7 @@ def verify_month(before, after, rules):
         changed.add(path)
         old = ET.fromstring(original[path])
         new = ET.fromstring(blank[path])
+        old_formulas, new_formulas = formula_arithmetic(old), formula_arithmetic(new)
         cells = {c.attrib['r']: c for c in new.findall('.//s:c', NS)}
         for cell in old.findall('.//s:c', NS):
             ref = cell.attrib['r']
@@ -99,8 +132,13 @@ def verify_month(before, after, rules):
             formula = cell.find('s:f', NS)
             if formula is not None:
                 counterpart = actual.find('s:f', NS)
-                assert counterpart is not None and formula.text == counterpart.text and formula.attrib == counterpart.attrib
-                assert actual.find('s:v', NS) is None
+                assert counterpart is not None and old_formulas[ref] == new_formulas[ref], ref
+                if int(row) >= rule['start_row'] and column in rule['columns']:
+                    assert actual.find('s:v', NS) is None
+                else:
+                    old_value, new_value = cell.find('s:v', NS), actual.find('s:v', NS)
+                    assert (list(old_value.itertext()) if old_value is not None else []) == (list(new_value.itertext()) if new_value is not None else []), ref
+                    if formula.attrib.get('t') != 'shared': assert formula.text == counterpart.text and formula.attrib == counterpart.attrib
             elif int(row) >= rule['start_row'] and column in rule['columns']:
                 assert actual.find('s:v', NS) is None and actual.find('s:is', NS) is None
             else:

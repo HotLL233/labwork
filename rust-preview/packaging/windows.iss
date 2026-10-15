@@ -1,4 +1,4 @@
-#define Version "0.0.7"
+#define Version "0.0.8"
 #ifndef AppIdValue
   #define AppIdValue "LabworkRustPlatform"
 #endif

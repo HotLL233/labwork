@@ -272,15 +272,33 @@ pub fn blank_month_adjusted(bytes:&[u8],rules:&[MonthRule],adjustments:&[MonthAd
         if rule.sheet.trim()=="目录" {return Err("目录仅用于浏览，不能清空".into());}
         let columns=rule.clear_columns.iter().map(|c|coord(&format!("{c}1")).and_then(|(r,col)|if r==1&&letter(col)==*c{Ok(col)}else{Err("清空列必须使用A、B等大写列名".into())})).collect::<Result<HashSet<_>,String>>()?;
         let selected=|row:u32,col:u32|ranges.iter().rev().find(|(a,b,_)|a.0<=row&&row<=b.0&&a.1<=col&&col<=b.1).map(|(_,_,clear)|*clear).unwrap_or(row>=rule.data_start_row&&columns.contains(&col));
-        if let Ok(method)=generic_method(&book,&rule.sheet,0){for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let (row,col)=coord(reference)?;if selected(row,col){return Err(format!("{}的清空范围包含固定参数{reference}，请保留此单元格",rule.sheet));}}}}
+        let method=generic_method(&book,&rule.sheet,0).ok();
+        if let Some(method)=&method{for key in method.params.keys(){if let Some(reference)=key.strip_prefix("fixed:"){let (row,col)=coord(reference)?;if selected(row,col){return Err(format!("{}的清空范围包含固定参数{reference}，请保留此单元格",rule.sheet));}}}}
+        let document=doc(&book.parts[&path])?;
+        let formulas=if method.is_some(){expanded_formulas(&document)?}else{BTreeMap::new()};
+        let shared=document.descendants().filter(|n|n.has_tag_name("c")).filter_map(|cell|{
+            let (row,col)=coord(&attr(cell,"r")).ok()?;let formula=cell.children().find(|n|n.has_tag_name("f"))?;
+            (selected(row,col)&&formula.attribute("t")==Some("shared")).then(||attr(formula,"si"))
+        }).collect::<HashSet<_>>();
         let mut root=editable_xml(&book.parts[&path])?;
         let data=root.get_mut_child("sheetData").ok_or("缺少工作表数据区")?;
         for row in data.children.iter_mut().filter_map(XMLNode::as_mut_element) {
             for cell in row.children.iter_mut().filter_map(XMLNode::as_mut_element).filter(|e|e.name=="c") {
                 let (r,c)=coord(cell.attributes.get("r").ok_or("缺少单元格坐标")?)?;
-                if cell.get_child("f").is_some() {
-                    cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"));
-                } else if cell.get_child("f").is_none()&&selected(r,c) {
+                if let Some(formula)=cell.get_child("f") {
+                    let selected=selected(r,c);
+                    let guarded=if selected&&method.as_ref().is_some_and(|m|m.params.contains_key(&format!("f:{}",letter(c)))){formulas.get(&(r,c)).map(|f|blank_formula(f,r)).transpose()?.flatten()}else{None};
+                    let expanded=formula.attributes.get("t").is_some_and(|t|t=="shared")&&formula.attributes.get("si").is_some_and(|si|shared.contains(si));
+                    if guarded.is_some()||expanded&&method.is_some(){
+                        let expression=guarded.as_ref().or_else(||formulas.get(&(r,c))).ok_or("共享公式缺少主公式")?;
+                        let formula=cell.get_mut_child("f").unwrap();formula.attributes.retain(|key,_|!["t","si","ref"].contains(&key.as_str()));formula.children=vec![XMLNode::Text(expression.clone())];
+                    }
+                    if selected {
+                        cell.attributes.remove("t");
+                        if guarded.is_some(){cell.attributes.insert("t".into(),"str".into());}
+                        cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="is"));
+                    }
+                } else if selected(r,c) {
                     cell.attributes.remove("t");cell.children.retain(|n|!matches!(n,XMLNode::Element(e)if e.name=="v"||e.name=="is"));
                 }
             }
@@ -477,6 +495,20 @@ fn view_inner(bytes:&[u8],sheet:&str,method:Option<&Method>,highlight:&[u32],pag
     let rows=selected.map(|r|json!({"number":r,"height":heights.get(&r).copied().unwrap_or(24.),"cells":(1..=max_col).map(|c|all.get(&(r,c)).cloned().unwrap_or_else(||json!({"ref":format!("{}{r}",letter(c)),"value":"","raw":"","formula":"","style":0,"highlight":highlight.contains(&r)}))).collect::<Vec<_>>()})).collect::<Vec<_>>();
     Ok(json!({"name":sheet,"rows":rows,"columns":widths.iter().enumerate().map(|(i,w)|json!({"label":letter(i as u32+1),"width":w})).collect::<Vec<_>>(),"styles":css,"merges":merges,"last_row":max_row,"sheet_names":book.order,"start_row":page.unwrap_or(1),"next_row":page.filter(|start|start+199<max_row).map(|start|start+200),"truncated":page.is_some_and(|start|start>1||start+199<max_row)||full_columns>max_col,"columns_truncated":full_columns>max_col}))
 }
+fn blank_formula(expression:&str,row:u32)->Result<Option<String>,String>{
+    let expression=expression.strip_prefix('=').unwrap_or(expression);
+    let inputs=crate::formula::references(expression)?.into_iter().filter(|reference|coord(reference).is_ok_and(|(r,_)|r==row)&&!reference.trim_end_matches(|c:char|c.is_ascii_digit()).ends_with('$')).collect::<Vec<_>>();
+    if inputs.is_empty(){return Ok(None);}
+    let guarded=format!("IF(OR({}),\"\",{expression})",inputs.iter().map(|r|format!("{r}=\"\"")).collect::<Vec<_>>().join(","));
+    if inputs.len()>255||guarded.len()>8192{return Err("空白结果保护超出Excel公式限制，未生成模板".into());}Ok(Some(guarded))
+}
+fn original_formula(expression:&str,row:u32)->&str{
+    // Recognize only our exact blank-input guard; other Excel functions remain unsupported.
+    if let Some(inner)=expression.strip_prefix("IF(OR(").and_then(|s|s.split_once("),\"\",")).map(|(_,s)|s).and_then(|s|s.strip_suffix(')')){
+        if blank_formula(inner,row).ok().flatten().as_deref()==Some(expression){return inner;}
+    }
+    expression
+}
 fn expanded_formulas(d:&Document<'_>)->Result<BTreeMap<(u32,u32),String>,String>{
     let mut masters=BTreeMap::new();let mut formulas=BTreeMap::new();
     for cell in d.descendants().filter(|n|n.has_tag_name("c")) {
@@ -484,6 +516,7 @@ fn expanded_formulas(d:&Document<'_>)->Result<BTreeMap<(u32,u32),String>,String>
             if matches!(f.attribute("t"),Some("array"|"dataTable")){return Err("数组或数据表公式尚未支持".into());}
             if let Some(text)=f.text().filter(|s|!s.is_empty()) {
                 let position=coord(&attr(cell,"r"))?;
+                let text=original_formula(text,position.0);
                 if f.attribute("t")==Some("shared"){masters.insert(attr(f,"si"),(position,text.to_owned()));}
                 formulas.insert(position,text.to_owned());
             }
@@ -719,6 +752,46 @@ pub fn replace_file(source:&Path,target:&Path)->std::io::Result<()>{std::fs::ren
 mod tests {
     use super::*;
     #[test]
+    fn blank_calculation_columns_preserve_methods_examples_keeps_and_shared_formulas(){
+        let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
+        for(name,xml)in[
+            ("xl/workbook.xml",format!(r#"<workbook xmlns="{MAIN}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="硫酸根" sheetId="1" r:id="r1"/></sheets></workbook>"#)),
+            ("xl/_rels/workbook.xml.rels",r#"<Relationships><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>"#.into()),
+            ("xl/styles.xml",format!(r#"<styleSheet xmlns="{MAIN}"><cellXfs count="1"><xf numFmtId="0"/></cellXfs></styleSheet>"#)),
+            ("xl/worksheets/sheet1.xml",format!(r#"<worksheet xmlns="{MAIN}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="2" topLeftCell="A3" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="9" width="18" customWidth="1"/></cols><sheetData>
+                <row r="1"><c r="A1" t="inlineStr"><is><t>日期</t></is></c><c r="B1" t="inlineStr"><is><t>批号</t></is></c><c r="C1" t="inlineStr"><is><t>质量</t></is></c><c r="D1" t="inlineStr"><is><t>V3</t></is></c><c r="E1" t="inlineStr"><is><t>V2</t></is></c><c r="F1" t="inlineStr"><is><t>硫酸根含量</t></is></c><c r="G1" t="inlineStr"><is><t>换算含量</t></is></c><c r="H1" t="inlineStr"><is><t>C (mol/L)</t></is></c><c r="I1"><v>0.005117</v></c></row>
+                <row r="2"><c r="I2"><v>40.9</v></c></row>
+                <row r="3" ht="25"><c r="B3" t="inlineStr"><is><t>例</t></is></c><c r="C3"><v>1.0537</v></c><c r="D3"><v>2.71</v></c><c r="E3"><v>0</v></c><c r="F3"><f>$I$1*($I$2+E3-D3)*0.09606/C3*100</f><v>1.7815</v></c><c r="G3"><f>F3*H3/I3</f><v>0.89075</v></c><c r="H3"><v>1</v></c><c r="I3"><v>2</v></c></row>
+                <row r="4"><c r="C4"><v>1</v></c><c r="D4"><v>1</v></c><c r="E4"><v>0</v></c><c r="F4"><f t="shared" si="0" ref="F4:F5">$I$1*($I$2+E4-D4)*0.09606/C4*100</f><v>1.9</v></c><c r="G4"><f>F4*H4/I4</f><v>0.95</v></c><c r="H4"><v>1</v></c><c r="I4"><v>2</v></c></row>
+                <row r="5"><c r="C5"><v>1</v></c><c r="D5"><v>1</v></c><c r="E5"><v>0</v></c><c r="F5"><f t="shared" si="0"/><v>1.9</v></c><c r="G5"><f>F5*H5/I5</f><v>0.95</v></c><c r="H5"><v>1</v></c><c r="I5"><v>2</v></c></row>
+                <row r="6"><c r="C6"><v>2</v></c><c r="F6"><v>99</v></c><c r="G6"><v>100</v></c></row>
+                </sheetData></worksheet>"#)),
+        ]{zip.start_file(name,SimpleFileOptions::default()).unwrap();zip.write_all(xml.as_bytes()).unwrap();}
+        let source=zip.finish().unwrap().into_inner();let rules=discover(&source).unwrap();assert_eq!(rules[0].data_start_row,4);
+        let candidate=blank_month(&source,&rules).unwrap();let blank=read(&candidate).unwrap();let d=doc(&blank.parts["xl/worksheets/sheet1.xml"]).unwrap();
+        let cell=|reference:&str|d.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();
+        for reference in ["C4","E4","F4","G4","F5","G5","F6","G6","H4","I4"]{assert!(cell_value(cell(reference),&blank.strings).unwrap().is_empty(),"{reference}");}
+        for (reference,value) in [("F3","1.7815"),("G3","0.89075"),("I1","0.005117"),("I2","40.9")]{assert_eq!(cell_value(cell(reference),&blank.strings).unwrap(),value);}
+        for reference in ["F4","F5","G4","G5"]{let f=cell(reference).children().find(|n|n.has_tag_name("f")).unwrap();assert!(f.attributes().next().is_none());assert!(f.text().unwrap().starts_with("IF(OR("));assert_eq!(cell(reference).attribute("t"),Some("str"));}
+        assert_eq!(cell("F4").children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(r#"IF(OR(C4="",D4="",E4=""),"",$I$1*($I$2+E4-D4)*0.09606/C4*100)"#));
+        let methods=generic_methods(&candidate).unwrap();assert_eq!(methods.len(),1);let method=&methods[0];assert_eq!(method.kind,"workbook_formula");
+        let raw=method.fields.iter().map(|f|(f.key.clone(),if f.key=="col_E"{"0".into()}else{"1".into()})).collect::<Values>();
+        let output=generic_calculate(method,&raw).unwrap();assert!(output["col_F"].parse::<f64>().unwrap()>0.0);
+        let mut zero=raw.clone();zero.insert("col_C".into(),"0".into());assert!(generic_calculate(method,&zero).unwrap_err().contains("分母为零"));
+        let request:Request=serde_json::from_value(json!({"project":"P","method":method.key,"entries":[{"date":"2026-10-15","batch":"AFTER-CLEAR","measurement":raw}]})).unwrap();
+        let (written,rows)=append(&candidate,method,&request,&[output.clone()]).unwrap();assert_eq!(rows,vec![4]);
+        let written=read(&written).unwrap();let d=doc(&written.parts["xl/worksheets/sheet1.xml"]).unwrap();let result=d.descendants().find(|n|n.attribute("r")==Some("F4")).unwrap();assert_eq!(cell_value(result,&written.strings).unwrap(),output["col_F"]);
+        let twice=blank_month(&candidate,&discover(&candidate).unwrap()).unwrap();assert_eq!(raw_view(&candidate,"硫酸根",1).unwrap(),raw_view(&twice,"硫酸根",1).unwrap(),"monthly clearing must not nest formula guards");
+        let adjustments:Vec<MonthAdjustment>=serde_json::from_value(json!([{"project":"P","sheet":"硫酸根","range":"F4:G4","operation":"keep"}])).unwrap();
+        let kept=read(&blank_month_adjusted(&source,&rules,&adjustments).unwrap()).unwrap();let d=doc(&kept.parts["xl/worksheets/sheet1.xml"]).unwrap();
+        for (reference,value) in [("F4","1.9"),("G4","0.95")]{let cell=d.descendants().find(|n|n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell_value(cell,&kept.strings).unwrap(),value);assert!(!cell.children().find(|n|n.has_tag_name("f")).unwrap().text().unwrap().starts_with("IF(OR("));}
+        assert_eq!(kept.parts["xl/styles.xml"],read(&source).unwrap().parts["xl/styles.xml"]);
+        assert_eq!(original_formula(r#"IFERROR(C4/D4,"")"#,4),r#"IFERROR(C4/D4,"")"#);
+        assert_eq!(original_formula(r#"IF(OR(C4=""),"",C4/D4)"#,4),r#"IF(OR(C4=""),"",C4/D4)"#,"partial guards must not silently change formula meaning");
+        assert!(blank_formula(&(1..=256).map(|c|format!("{}4",letter(c))).collect::<Vec<_>>().join("+"),4).is_err());
+        assert!(blank_formula(&format!("{}C4"," ".repeat(8175)),4).is_err());
+    }
+    #[test]
     fn template_regions_preserve_formulas_fixed_parameters_and_unknown_sheets(){
         let mut zip=ZipWriter::new(Cursor::new(Vec::new()));
         for(name,xml)in[
@@ -742,7 +815,7 @@ mod tests {
         ])).unwrap();
         let adjusted=read(&blank_month_adjusted(&bytes,&rules,&adjustments).unwrap()).unwrap();
         for(path,values)in[("xl/worksheets/sheet1.xml",vec![("C3",""),("F3","5")]),("xl/worksheets/sheet2.xml",vec![("A3","7")]),("xl/worksheets/sheet3.xml",vec![("C3",""),("F3","5")])]{let d=doc(&adjusted.parts[path]).unwrap();for(reference,value)in values{let cell=d.descendants().find(|n|n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell_value(cell,&adjusted.strings).unwrap(),value);}}
-        for(path,reference,formula)in[("xl/worksheets/sheet1.xml","D3","C3*$F$3"),("xl/worksheets/sheet2.xml","B3","A3*2"),("xl/worksheets/sheet3.xml","D3","ROUND(C3*$F$3,2)")]{let d=doc(&adjusted.parts[path]).unwrap();let cell=d.descendants().find(|n|n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell.children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));assert!(cell.children().all(|n|!n.has_tag_name("v")));}
+        for(path,reference,formula,value)in[("xl/worksheets/sheet1.xml","D3","C3*$F$3","10"),("xl/worksheets/sheet2.xml","B3","A3*2",""),("xl/worksheets/sheet3.xml","D3","ROUND(C3*$F$3,2)","10")]{let d=doc(&adjusted.parts[path]).unwrap();let cell=d.descendants().find(|n|n.attribute("r")==Some(reference)).unwrap();assert_eq!(cell.children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));assert_eq!(cell_value(cell,&adjusted.strings).unwrap(),value,"only selected formula caches are cleared");}
         assert_eq!(adjusted.parts["xl/styles.xml"],source.parts["xl/styles.xml"]);
         for range in ["A1","F3","A3:GS1000"]{let bad:Vec<MonthAdjustment>=serde_json::from_value(json!([{"project":"P","sheet":"数据","range":range,"operation":"clear"}])).unwrap();assert!(blank_month_adjusted(&bytes,&rules,&bad).is_err(),"{range}");}
     }
@@ -871,12 +944,19 @@ mod tests {
             for rule in &rules {
                 let path=target(&source,&rule.sheet).unwrap();let d=doc(&source.parts[path]).unwrap();let output=doc(&blank.parts[path]).unwrap();
                 let cells=output.descendants().filter(|n|n.has_tag_name("c")).map(|n|(attr(n,"r"),n)).collect::<BTreeMap<_,_>>();
+                let arithmetic=if rule.clear_columns.is_empty(){None}else{Some((expanded_formulas(&d).unwrap(),expanded_formulas(&output).unwrap()))};
                 for cell in d.descendants().filter(|n|n.has_tag_name("c")) {
                     let reference=attr(cell,"r");let (row,col)=coord(&reference).unwrap();let actual=cells[&reference];
                     assert_eq!(cell.attribute("s"),actual.attribute("s"));
-                    if let Some(formula)=cell.children().find(|n|n.has_tag_name("f")).filter(|_|!rule.clear_columns.is_empty()) {
-                        let actual_formula=actual.children().find(|n|n.has_tag_name("f")).unwrap();assert_eq!(formula.text(),actual_formula.text());assert_eq!(formula.attributes().map(|a|(a.name(),a.value())).collect::<BTreeMap<_,_>>(),actual_formula.attributes().map(|a|(a.name(),a.value())).collect::<BTreeMap<_,_>>());
-                        assert!(!actual.children().any(|n|n.has_tag_name("v")));
+                    if let Some(formula)=cell.children().find(|n|n.has_tag_name("f")) {
+                        let actual_formula=actual.children().find(|n|n.has_tag_name("f")).unwrap();
+                        if row>=rule.data_start_row&&rule.clear_columns.contains(&letter(col)) {
+                            let (before,after)=arithmetic.as_ref().unwrap();assert_eq!(before[&(row,col)],after[&(row,col)],"clearing must preserve original arithmetic");
+                            assert!(!actual.children().any(|n|n.has_tag_name("v")));
+                        }else{
+                            assert_eq!(cell_value(cell,&source.strings).unwrap(),cell_value(actual,&blank.strings).unwrap());
+                            if formula.attribute("t")!=Some("shared"){assert_eq!(formula.text(),actual_formula.text());assert_eq!(formula.attributes().map(|a|(a.name(),a.value())).collect::<BTreeMap<_,_>>(),actual_formula.attributes().map(|a|(a.name(),a.value())).collect::<BTreeMap<_,_>>());}
+                        }
                     } else if row>=rule.data_start_row&&rule.clear_columns.contains(&letter(col)) {
                         assert!(cell_value(actual,&blank.strings).unwrap().is_empty());
                     } else {assert_eq!(cell_value(cell,&source.strings).unwrap(),cell_value(actual,&blank.strings).unwrap());}
@@ -979,7 +1059,7 @@ mod tests {
         let blank_cell=|reference:&str|blank_doc.descendants().find(|n|n.has_tag_name("c")&&n.attribute("r")==Some(reference)).unwrap();
         for reference in ["A4","B4","C4","A5","C24"]{assert_eq!(cell_value(blank_cell(reference),&blank_book.strings).unwrap(),"");}
         for (reference,value) in [("F2","35.45"),("F4","0.1032"),("B1","批号")] {assert_eq!(cell_value(blank_cell(reference),&blank_book.strings).unwrap(),value);}
-        for (reference,formula) in [("A8","A6"),("B9","B6"),("E24","C24*2")] {let c=blank_cell(reference);assert_eq!(c.children().find(|n|n.has_tag_name("f")).unwrap().text(),Some(formula));assert!(c.children().all(|n|!n.has_tag_name("v")));}
+        for (reference,formula) in [("A8","A6"),("B9","B6"),("E24","C24*2")] {let c=blank_cell(reference);assert_eq!(original_formula(c.children().find(|n|n.has_tag_name("f")).unwrap().text().unwrap(),coord(reference).unwrap().0),formula);assert!(c.children().all(|n|!n.has_tag_name("v")));}
         assert_eq!(blank_cell("A3").attribute("s"),Some("0"));
         for (name,part) in &source_book.parts {if name!="xl/worksheets/sheet1.xml"{assert_eq!(blank_book.parts[name],*part);}}
         assert!(blank_month(&source,&[]).is_err());assert!(blank_month(&source,&[rule.clone(),rule.clone()]).is_err());

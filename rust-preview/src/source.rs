@@ -15,7 +15,7 @@ pub fn initialize(db:&Connection)->Result<(),rusqlite::Error>{
 pub fn get(db:&Connection,month:&str,code:&str)->Result<Option<Binding>,Error>{
     db.query_row("SELECT path,hash FROM source_links WHERE month=?1 AND project=?2",params![month,code],|r|Ok(Binding{path:r.get(0)?,hash:r.get(1)?})).optional().map_err(error)
 }
-fn local_path(path:&str)->Result<PathBuf,Error>{
+pub(super) fn local_path(path:&str)->Result<PathBuf,Error>{
     let p=PathBuf::from(path);
     if !p.is_absolute()||path.starts_with("\\\\")||path.starts_with("//")||p.extension().is_none_or(|e|!e.to_string_lossy().eq_ignore_ascii_case("xlsx")){return Err(error("请填写服务器本机现存xlsx文件的绝对路径，不支持网络共享或相对路径"));}
     if !p.is_file(){return Err(error("关联原表不存在或不是普通文件"));}
@@ -24,7 +24,7 @@ fn local_path(path:&str)->Result<PathBuf,Error>{
     if canonical.to_string_lossy().starts_with(r"\\?\UNC\"){return Err(error("不支持网络共享原表"));}
     Ok(canonical)
 }
-fn external(app:&App,path:&Path)->Result<(),Error>{
+pub(super) fn external(app:&App,path:&Path)->Result<(),Error>{
     if path.starts_with(fs::canonicalize(&app.home).map_err(error)?){return Err(error("不能将平台管理目录中的文件作为原表"));}Ok(())
 }
 fn available(app:&App,path:&str,month:&str,code:&str)->Result<(),Error>{

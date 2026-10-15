@@ -42,7 +42,7 @@ pub fn initialize(home:&FsPath)->Result<(),Box<dyn std::error::Error>> {
     }
     fs::rename(stage,directory(home,&current()))?;Ok(())
 }
-fn save_json(path:&FsPath,value:&impl Serialize)->Result<(),Error> {
+pub(super) fn save_json(path:&FsPath,value:&impl Serialize)->Result<(),Error> {
     let temp=path.with_extension(format!("{}.tmp",random_id()));
     fs::write(&temp,serde_json::to_vec(value).map_err(error)?).map_err(error)?;
     if path.exists(){workbook::replace_file(&temp,path).map_err(error)?;}else{fs::rename(&temp,path).map_err(error)?;}Ok(())

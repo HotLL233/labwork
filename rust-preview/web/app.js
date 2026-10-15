@@ -3,6 +3,7 @@ const $=id=>document.getElementById(id);
 let catalog=[],catalogInfo={},selectedSheet=null,project,method,baseView,nextRow=4,rows=[],previewId=null,busy=false,writing=false,inputVersion=0,selection=null,anchor=null,drag=null,undo=[];
 let sheetRequestId=0,rawNext=null,workbookFingerprint=null;
 let monthPreview=null,monthPreviewRequest=0,monthPreviewBusy=false,monthPreviewBlocked=false,monthAdjustments=[],monthSelection=null,monthAnchor=null,monthDrag=false,monthDragged=false,monthFocus={};
+let sourceFolderPreview=null;
 let selectedMonth=sessionStorage.getItem('labwork-month')||'';
 const token=document.querySelector('meta[name="labwork-token"]').content;
 const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -15,7 +16,7 @@ const emptyRow=()=>({date:LabGrid.labels(rows).at(-1)?.date||today(),batch:LabGr
 async function responseData(response){if(response.status===401){location.assign('/login');throw Error('请登录后继续');}const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data;}
 async function api(path,body){const response=await fetch(path,{headers:{...(selectedMonth?{'X-Labwork-Month':selectedMonth}:{}),...(body?{'Content-Type':'application/json','X-Labwork-Token':token}:{})},method:body?'POST':'GET',body:body?JSON.stringify(body):undefined});return responseData(response);}
 function showWorkspace(view){if(busy)return;$('entry-view').hidden=view!=='entry';$('management-view').hidden=view!=='manage';for(const [id,value] of [['nav-entry','entry'],['nav-manage','manage']]){$(id).classList.toggle('active',view===value);$(id).setAttribute('aria-pressed',String(view===value));}}
-$('nav-entry').onclick=()=>showWorkspace('entry');$('nav-manage').onclick=()=>showWorkspace('manage');$('manage-shortcut').onclick=()=>{showWorkspace('manage');$('source-import-path').focus();};
+$('nav-entry').onclick=()=>showWorkspace('entry');$('nav-manage').onclick=()=>showWorkspace('manage');$('manage-shortcut').onclick=()=>{showWorkspace('manage');$('source-folder-path').focus();};
 $('link-source-shortcut').onclick=()=>{showWorkspace('manage');$('source-panel').scrollIntoView({behavior:'smooth',block:'start'});$('source-path').focus();};
 $('project-select').onchange=()=>selectProject($('project-select').value);$('sheet-select').onchange=()=>selectSheet($('sheet-select').value);
 $('logout').onclick=async()=>{if(busy)return;try{await api('/api/logout',{});location.assign('/login');}catch(e){message(e.message);}};
@@ -138,7 +139,7 @@ async function selectProject(code,sheetKey,methodKey,draftRows){
   renderSource();
   $('download-workbook').hidden=!project;
   if(project)$('download-workbook').href='/api/workbook/'+encodeURIComponent(project.code)+'/download?month='+encodeURIComponent(selectedMonth);
-  if(!project){$('methods').innerHTML='';$('title').textContent='请关联服务器工作簿';$('browse-note').hidden=true;$('import-panel').open=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
+  if(!project){$('methods').innerHTML='';$('title').textContent='请关联项目总文件夹';$('browse-note').hidden=true;$('sheet-select').innerHTML='<option>尚无工作表</option>';showWorkspace('manage');return;}
   $('methods').innerHTML=(project.sheets||[]).map(item=>`<button data-key="${escape(item.key)}">${escape(item.name)}</button>`).join('');
   $('sheet-select').innerHTML=project.sheets.map(item=>`<option value="${escape(item.key)}">${escape(item.name)}</option>`).join('');
   $('methods').querySelectorAll('button').forEach(button=>button.onclick=()=>selectSheet(button.dataset.key));
@@ -254,30 +255,51 @@ function workbookStatus(){
   const exists=catalog.some(item=>item.code.toLowerCase()===code.toLowerCase());
   $('workbook-status').textContent=exists?'该项目已存在；请使用此项目的“关联原文件”，不要再次上传。':'支持 .xlsx，最大20 MB；上传只保存副本，不会关联电脑上的原文件。';
   $('import-workbook').disabled=busy||exists||!code||!$('project-name').value.trim()||!$('workbook-file').files.length||!writable();
-  sourceImportStatus();
+  sourceFolderStatus();
 }
-function sourceImportStatus(){
-  const code=$('source-import-code').value.trim(),exists=catalog.some(item=>item.code.toLowerCase()===code.toLowerCase());
-  $('source-import-status').textContent=exists?'该项目已存在；选择左侧该项目后，使用下方“关联当前项目原文件”，不会新增重复项目。':'由你填写服务器本机现有文件的绝对路径；建立项目并关联同一原文件，确认写入时追加结果。';
-  $('source-import-submit').disabled=busy||!writable()||exists||!code||!$('source-import-name').value.trim()||!$('source-import-path').value.trim();
+function sourceFolderStatus(){
+  $('source-folder-scan').disabled=busy||!$('source-folder-path').value.trim();
+  $('source-folder-bind').hidden=!sourceFolderPreview;
+  $('source-folder-bind').disabled=busy||sourceFolderPreview?.can_bind!==true;
 }
-for(const id of ['source-import-code','source-import-name','source-import-path'])$(id).addEventListener('input',sourceImportStatus);
-$('source-import-form').onsubmit=async event=>{
-  event.preventDefault();if(busy||!writable())return;
-  const code=$('source-import-code').value.trim(),name=$('source-import-name').value.trim(),path=$('source-import-path').value.trim();
-  if(!code||!name||!path)return;
-  if(catalog.some(item=>item.code.toLowerCase()===code.toLowerCase())){message('该项目已存在；请选择这个项目并关联原文件，不需要再次导入。');return;}
-  const ok=await exclusive(async()=>{await api('/api/workbook/'+encodeURIComponent(code)+'/source-import',{path,name});await loadCatalog();$('source-import-form').reset();});
-  if(ok){await selectProject(code);showWorkspace('entry');message('工作簿已由你指定的路径关联，目录已生成；计算或手工结果将在确认后写入原文件。',true);}
+function invalidateSourceFolder(){
+  sourceFolderPreview=null;$('source-folder-results').hidden=true;$('source-folder-results').innerHTML='';sourceFolderStatus();
+}
+$('source-folder-path').addEventListener('input',()=>{invalidateSourceFolder();$('source-folder-status').textContent='路径已更改，请扫描后核对识别结果。';});
+$('source-folder-form').onsubmit=async event=>{
+  event.preventDefault();if(busy)return;
+  const path=$('source-folder-path').value.trim();if(!path)return;
+  invalidateSourceFolder();
+  $('source-folder-status').textContent='正在识别项目和月份…';
+  const ok=await exclusive(async()=>{
+    sourceFolderPreview=await api('/api/source-folder/scan',{path});
+    const entries=sourceFolderPreview.entries||[],issues=sourceFolderPreview.issues||[];
+    $('source-folder-results').innerHTML='<table><thead><tr><th>项目</th><th>月份</th><th>原文件</th><th>识别结果</th></tr></thead><tbody>'+entries.map(item=>`<tr><td>${escape(item.name)}<small>${escape(item.project)}</small></td><td>${escape(item.month)}</td><td>${escape(item.path)}</td><td>${escape(item.message||({import:'待导入关联',link:'待关联',relink:'待迁移关联',linked:'已关联',conflict:'冲突'}[item.state])||item.state)}</td></tr>`).join('')+'</tbody></table>'+(issues.length?'<ul class="folder-issues">'+issues.map(issue=>`<li>${escape(issue)}</li>`).join('')+'</ul>':'');
+    $('source-folder-results').hidden=false;
+    $('source-folder-status').textContent=`识别到 ${entries.length} 个工作簿。`+(sourceFolderPreview.can_bind?'核对项目、月份和路径后确认关联；原文件保持原样。':'请处理识别问题后重新扫描。');
+  });
+  if(!ok)$('source-folder-status').textContent='扫描未完成，请核对路径及上方错误后重试。';
+};
+$('source-folder-bind').onclick=async()=>{
+  if(busy||sourceFolderPreview?.can_bind!==true)return;
+  const request={path:sourceFolderPreview.root,fingerprint:sourceFolderPreview.fingerprint};
+  let result;
+  const ok=await exclusive(async()=>{
+    result=await api('/api/source-folder/bind',request);selectedMonth=result.month;sessionStorage.setItem('labwork-month',selectedMonth);await loadCatalog();
+  });
+  if(ok){await selectProject(catalog[0]?.code);showWorkspace('entry');message(`总文件夹已关联：新增 ${result.imported} 个，关联 ${result.linked} 个，已有 ${result.skipped} 个。原文件未修改，可选择项目和月份开始录入。`,true);}
+  else{invalidateSourceFolder();$('source-folder-status').textContent=result?'关联已完成，但目录刷新失败，请刷新页面核对。':'关联未完成，请重新扫描并核对。';}
 };
 for(const id of ['project-code','project-name','workbook-file'])$(id).addEventListener('input',workbookStatus);
 $('workbook-file').addEventListener('change',()=>{const file=$('workbook-file').files[0];if(!file)return;const name=file.name.replace(/\.xlsx$/i,'');if(!$('project-name').value.trim())$('project-name').value=name;if(!$('project-code').value.trim()&&/^[A-Za-z0-9_-]{1,32}$/.test(name))$('project-code').value=name;workbookStatus();});
 async function loadCatalog(){
   invalidateMonthPreview(true);
+  invalidateSourceFolder();
   let data;try{data=await api('/api/catalog');}catch(error){if(!selectedMonth||error.message!=='月份不存在，请刷新目录')throw error;selectedMonth='';sessionStorage.removeItem('labwork-month');data=await api('/api/catalog');}catalogInfo=data;catalog=data.projects;selectedMonth=data.active_month;sessionStorage.setItem('labwork-month',selectedMonth);
   $('instance-info').textContent='版本 '+data.version+' · 端口 '+data.port+' · 数据目录：'+data.data_directory;
   $('lan-info').textContent=data.lan_url?'局域网：'+data.lan_url:'局域网访问未开启';
-  $('projects').innerHTML=catalog.map(item=>`<button data-code="${escape(item.code)}" title="${escape(item.name)}"><span class="project-label"><span class="project-name">${escape(item.name)}</span><small>${escape(item.code)} · ${item.source_link?'已关联':'待关联'}</small></span><span class="project-count">${item.sheets.length} 表</span></button>`).join('')||'<p class="empty-projects">尚无项目，请在“工作簿管理”中关联服务器工作簿。</p>';
+  if(!$('source-folder-path').value.trim())$('source-folder-path').value=data.source_folder||'';
+  $('projects').innerHTML=catalog.map(item=>`<button data-code="${escape(item.code)}" title="${escape(item.name)}"><span class="project-label"><span class="project-name">${escape(item.name)}</span><small>${escape(item.code)} · ${item.source_link?'已关联':'待关联'}</small></span><span class="project-count">${item.sheets.length} 表</span></button>`).join('')||'<p class="empty-projects">尚无项目，请在“工作簿管理”中关联总文件夹。</p>';
   $('project-select').innerHTML=catalog.map(item=>`<option value="${escape(item.code)}">${escape(item.name)} · ${escape(item.code)}</option>`).join('')||'<option>尚无项目</option>';
   $('projects').querySelectorAll('button').forEach(button=>button.onclick=()=>selectProject(button.dataset.code));
   const months=[...new Set([...(data.months||[]),data.active_month].filter(Boolean))].sort().reverse();
